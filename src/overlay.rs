@@ -40,6 +40,51 @@ pub fn marker_point(point:(f32,f32),width:f32,height:f32,angle:f32)->Option<(f32
     Some((cx+dx*t,cy+dy*t,true))
 }
 
+
+/// A map name may arrive through GSI before any pawn data is readable. Only
+/// report player readiness from the reader snapshot, never from map metadata.
+#[cfg(any(windows,test))]
+fn reader_notice(status:&str,player_count:usize,message:Option<&str>,columns:usize)->Option<Vec<String>> {
+    if player_count>0&&!matches!(status,"error"|"waiting"|"no_players"|"starting"){return None;}
+    let message=message.unwrap_or("");
+    // Reader failures are translated to bounded, known-safe UI text. Do not
+    // echo arbitrary paths, memory addresses or credentials into the overlay.
+    let reason=if message.contains("OpenProcess denied") {
+        "Нет доступа к процессу CS2. Проверьте права запуска."
+    }else if message.contains("cs2.exe not found") {
+        "CS2 не запущена. Запустите игру и откройте матч."
+    }else if message.contains("client.dll not loaded") {
+        "CS2 ещё загружается. Дождитесь загрузки матча."
+    }else if message.contains("Live mode requires Windows") {
+        "Чтение игроков доступно только в Windows."
+    }else if message.contains("No valid offsets")||message.contains("missing field")||message.starts_with("Missing ") {
+        "Нет актуальных офсетов. Перезапустите радар с доступом к сети."
+    }else if message.contains("Не удалось прочитать dwEntityList") {
+        "Не удалось прочитать игроков CS2. Проверьте доступ и приложите DIAG."
+    }else if message.contains("dwEntityList")||message.contains("офсеты устарели") {
+        "Список игроков пока недоступен. Откройте матч; если не поможет — приложите DIAG."
+    }else if message.contains("Контроллеры")||message.contains("pawn")||message.contains("Координаты") {
+        "Игроки не читаются. Проверьте версию игры и приложите DIAG."
+    }else if status=="starting" {
+        "Подключение к игре. Ожидание данных игроков."
+    }else if status=="waiting" {
+        "Ожидание CS2. Запустите игру и откройте матч."
+    }else{
+        "Чтение игроков не подтверждено. Скопируйте DIAG на основной карте."
+    };
+    let mut lines=vec!["Нет данных игроков".to_owned()];
+    let columns=columns.clamp(16,60);
+    let mut line=String::new();
+    for word in reason.chars().take(90).collect::<String>().split_whitespace(){
+        if !line.is_empty()&&line.chars().count()+1+word.chars().count()>columns {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty(){line.push(' ');}line.push_str(word);
+    }
+    if !line.is_empty(){lines.push(line);}
+    Some(lines)
+}
+
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(default)]
 pub struct OverlaySettings {
@@ -570,6 +615,19 @@ mod win {
             })
         }else{None};
         BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
+        let no_player_data=reader_notice(&snap.status,snap.players.len(),snap.message.as_deref(),((width-48)/8).max(16) as usize);
+        if let Some(lines)=no_player_data.as_ref(){
+            // Below the drag strip/X, visible even when GSI already names a map.
+            // Render after world content; omit stale bomb text in this panel.
+            BOMB_LINES.with(|s|*s.borrow_mut()=None);
+            LABELS.with(|s|s.borrow_mut().clear());
+            let panel_height=24+lines.len() as i32*19;
+            rectangle(g,10,45,width-20,panel_height,0xf518222d);
+            rectangle(g,10,45,3,panel_height,0xffffc477);
+            for (i,line) in lines.iter().enumerate(){
+                label(width as f32/2.,(56+i as i32*19) as f32,line.clone(),if i==0{0xffffd7a1}else{0xffdbe7ef});
+            }
+        }
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
         let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
         if cfg.follow_spectator {
@@ -578,6 +636,7 @@ mod win {
                 text.push_str(&format!(" | OBS: {short}"));
             }
         }
+        if no_player_data.is_some(){text="CAS MINI  •  НЕТ ДАННЫХ ИГРОКОВ".into();}
         // Leave room for the independent close control at every window size.
         let max_chars=((width-62)/7).max(4) as usize;
         text=text.chars().take(max_chars).collect();
@@ -757,6 +816,28 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
+    #[test]fn reader_status_is_independent_of_map_metadata(){
+        assert!(reader_notice("live",10,None,30).is_none());
+        assert!(reader_notice("demo",7,None,30).is_none());
+        for status in ["error","waiting","starting","no_players"]{
+            let lines=reader_notice(status,0,None,30).unwrap();
+            assert_eq!(lines[0],"Нет данных игроков");
+            assert!(lines.iter().skip(1).all(|line|line.chars().count()<=30));
+        }
+        assert!(reader_notice("live",0,None,30).is_some());
+        assert!(reader_notice("error",10,None,30).is_some());
+    }
+    #[test]fn reader_notice_wraps_unicode_and_does_not_echo_private_diagnostics(){
+        let lines=reader_notice("error",0,Some("dwEntityList empty 0xDEADBEEF token=private"),30).unwrap();
+        assert!(lines.iter().skip(1).all(|line|line.chars().count()<=30));
+        let text=lines.join(" ");
+        assert!(text.contains("Список игроков"));
+        assert!(!text.contains("DEADBEEF")&&!text.contains("private")&&!text.contains("token"));
+        let unknown=reader_notice("error",0,Some("unknown failure https://example.test/?key=secret"),30).unwrap().join(" ");
+        assert!(!unknown.contains("https:")&&!unknown.contains("secret"));
+        let missing=reader_notice("waiting",0,Some("cs2.exe not found"),30).unwrap().join(" ");
+        assert!(missing.contains("CS2 не запущена"));
+    }
     #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&s.follow_spectator&&!s.visible);assert!((s.zoom-1.0).abs()<0.01);}
     #[test]fn observer_setting_roundtrip(){
         let mut s=OverlaySettings::default();assert!(s.follow_spectator);

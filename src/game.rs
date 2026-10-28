@@ -17,6 +17,8 @@ fn weapon_name(id:u16)->String {
 }
 fn field(s:&Schema,k:&str,n:&str)->Result<u64,String>{s.field(k,n).ok_or(format!("missing field {k}.{n}"))}
 fn try_i32<M:Memory>(p:&mut M,addr:u64)->Option<i32>{p.read(addr,4).and_then(|v|v.try_into().ok()).map(i32::from_le_bytes)}
+fn try_u64<M:Memory>(p:&mut M,addr:u64)->Option<u64>{p.read(addr,8).and_then(|v|v.try_into().ok()).map(u64::from_le_bytes)}
+fn valid_pointer(ptr:u64)->bool{(0x10000..=0x7fff_ffff_ffff).contains(&ptr)}
 fn try_u8<M:Memory>(p:&mut M,addr:u64)->Option<u8>{p.read(addr,1).and_then(|v|v.first().copied())}
 fn try_f32<M:Memory>(p:&mut M,addr:u64)->Option<f32>{
     p.read(addr,4).and_then(|bytes|bytes.try_into().ok())
@@ -37,9 +39,10 @@ fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Op
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
-pub struct CS2Reader {pub schema:Schema, layout:Layout, layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>}
+pub struct CS2Reader {pub schema:Schema, layout:Layout, layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value}
 impl CS2Reader {
-    pub fn new(schema:Schema)->Self{Self{schema,layout:Layout::new(0),layout_at:None,probes:0,chunk_cache:HashMap::new()}}
+    pub fn new(schema:Schema)->Self{Self{schema,layout:Layout::new(0),layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({})}}
+    pub fn failure_diagnostics(&self)->serde_json::Value{self.failure_diagnostics.clone()}
     fn probe_layout<M:Memory>(&mut self,p:&mut M,list:u64,offset_addr:u64,local:u64){
         let now=Instant::now();
         if self.layout.confirmed && self.layout.root==list{return;}
@@ -483,8 +486,47 @@ impl CS2Reader {
         let start=Instant::now();self.chunk_cache.clear();
         let before_read=p.read_count();let before_fail=p.fail_count();
         let mut diag=Diagnostics::default();
+        self.failure_diagnostics=json!({});
+        diag.set("reader_stage",json!("entity_list"));
+        diag.set("offsets_build",self.schema.info["build_number"].clone());
+        diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
+        let build=if engine!=0{self.schema.engine_offset("dwBuildNumber")
+            .and_then(|off|try_i32(p,engine+off)).filter(|b|*b>0)}else{None};
+        diag.set("game_build",json!(build));
+        diag.set("offsets_match_game",json!(build.and_then(|b|self.schema.info["build_number"].as_u64().map(|n|n==b as u64))));
         let list_off=self.schema.offset("dwEntityList").ok_or("Missing dwEntityList")?;
-        let list=p.u64(base+list_off);if list==0{return Err("dwEntityList empty; loading scene or invalid offsets".into());}
+        let mut read=try_u64(p,base+list_off);
+        // Keep the first failure, since scanning may make other memory reads.
+        let read_error=if read.is_none(){p.last_error()}else{0};
+        diag.set("entity_list_initial_read_ok",json!(read.is_some()));
+        diag.set("entity_list_initial_win32_error",json!(read_error));
+        if !read.is_some_and(valid_pointer) && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
+            self.recovery_at=Some(Instant::now());
+            diag.set("runtime_recovery_attempted",json!(true));
+            if let Some(recovered)=crate::resolver::recover_player_globals(p,base){
+                self.schema.recover_player_offsets(recovered.entity_list_offset,recovered.local_controller_offset);
+                self.layout=Layout::new(0);self.layout_at=None;self.chunk_cache.clear();
+                self.runtime_offsets=true;
+                read=try_u64(p,base+recovered.entity_list_offset);
+            }
+        }
+        diag.set("runtime_offsets_verified",json!(self.runtime_offsets && read.is_some_and(valid_pointer)));
+        diag.set("entity_list_read_ok",json!(read.is_some()));
+        diag.set("entity_list_pointer_present",json!(read.is_some_and(valid_pointer)));
+        let list=match read.filter(|v|valid_pointer(*v)){
+            Some(list)=>list,
+            None=>{
+                diag.set("read_attempts",json!(p.read_count()-before_read));
+                diag.set("read_failures",json!(p.fail_count()-before_fail));
+                diag.set("last_win32_error",json!(read_error));
+                self.failure_diagnostics=diag.value();
+                return Err(if read.is_none(){
+                    format!("Не удалось прочитать dwEntityList (Win32 {read_error}). Проверьте доступ к CS2; адрес мог измениться после обновления игры.")
+                }else{
+                    "Список сущностей CS2 ещё не доступен либо офсеты устарели. Откройте матч; если ошибка сохраняется, приложите DIAG.".into()
+                });
+            }
+        };
         let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
         let current_time=self.game_time(p,base);
@@ -632,7 +674,7 @@ impl CS2Reader {
             ((1..=200).contains(&h),n!=0,v.is_some_and(|v|v!=[0.,0.,0.]))
         }else{(false,false,false)};
         diag.set("local_pawn_probe",json!({"pointer":probe>0,"health_valid":hp_valid,"scene_node":node_ok,"position_valid":pos_ok}));
-        diag.set("players",json!(players.len()));
+        diag.set("players",json!(players.len()));diag.set("reader_stage",json!("snapshot"));
         diag.set("read_attempts",json!(p.read_count()-before_read));diag.set("read_failures",json!(p.fail_count()-before_fail));
         diag.set("last_win32_error",json!(p.last_error()));diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
@@ -704,6 +746,28 @@ mod bomb_read_tests {
         p.put(block,&vec![0;512*0x78]);
         p.put(block+(index&511) as u64*0x78,&ptr.to_le_bytes());
     }
+    #[test]
+    fn entity_list_failures_retain_diagnostics_and_distinguish_null_from_unreadable(){
+        struct Denied;
+        impl Memory for Denied {
+            fn read(&mut self,_:u64,_:usize)->Option<Vec<u8>>{None}
+            fn last_error(&self)->u32{5}
+        }
+        let mut r=reader();
+        let error=r.snapshot(&mut Denied,0x100000,0,123,false,false).unwrap_err();
+        assert!(error.contains("Win32 5"));
+        let diagnostic=r.failure_diagnostics();
+        assert_eq!(diagnostic["entity_list_read_ok"],false);
+        assert_eq!(diagnostic["last_win32_error"],5);
+        assert_eq!(diagnostic["reader_stage"],"entity_list");
+        let mut r=reader();let mut memory=FakeMemory::new();
+        memory.put(0x100000+8,&0u64.to_le_bytes());
+        let error=r.snapshot(&mut memory,0x100000,0,123,false,false).unwrap_err();
+        assert!(!error.contains("Win32 5"));
+        assert_eq!(r.failure_diagnostics()["entity_list_read_ok"],true);
+        assert_eq!(r.failure_diagnostics()["entity_list_pointer_present"],false);
+    }
+
     #[test]
     fn flash_state_tracks_current_alpha_and_preserves_unknown_reads(){
         let r=reader();let mut p=FakeMemory::new();

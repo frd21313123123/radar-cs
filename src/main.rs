@@ -89,7 +89,12 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
             })();
             let snap=match result {
                 Ok(s)=>s,
-                Err(e)=>{proc.close();tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();Snapshot::status("error",&e)},
+                Err(e)=>{
+                    let mut failed=Snapshot::status("error",&e);failed.pid=proc.pid;
+                    failed.diagnostics=reader.as_ref().map(CS2Reader::failure_diagnostics)
+                        .unwrap_or_else(||json!({"reader_stage":"schema","offsets_available":false}));
+                    proc.close();tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();failed
+                },
             };
             if snap.status!="live"{
                 let msg=format!("{}: {:?}",snap.status,snap.message);
