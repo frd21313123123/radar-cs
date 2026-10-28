@@ -23,10 +23,12 @@ pub fn screen_point(position:[f32;3], overview:(f32,f32,f32), width:f32, height:
 }
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(default)]
 pub struct OverlaySettings {
     pub visible: bool,
     pub topmost: bool,
     pub center_local: bool,
+    pub rotate_with_view: bool,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -34,17 +36,18 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
+        if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
         if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
@@ -102,6 +105,7 @@ mod win {
     const WS_OVERLAPPEDWINDOW:u32=0x00cf0000;const WS_EX_TOPMOST:u32=0x00000008;
     const WS_EX_LAYERED:u32=0x00080000;const SWP_NOMOVE:u32=0x0002;const SWP_NOSIZE:u32=0x0001;const SWP_NOACTIVATE:u32=0x0010;
     const LWA_ALPHA:u32=0x0002;const TRANSPARENT:i32=1;
+    const SRCCOPY:u32=0x00CC0020; // CAS_ANTI_FLICKER_V11
     #[repr(C)]#[derive(Default,Clone,Copy)]struct Rect {left:i32,top:i32,right:i32,bottom:i32}
     #[repr(C)]#[derive(Default,Clone,Copy)]struct Point {x:i32,y:i32}
     #[repr(C)]struct Paint {hdc:HDC,erase:i32,rect:Rect,restore:i32,inc_update:i32,reserved:[u8;32]}
@@ -134,6 +138,12 @@ mod win {
     #[link(name="gdi32")]extern "system" {
         fn SetBkMode(dc:HDC,mode:i32)->i32;fn SetTextColor(dc:HDC,color:u32)->u32;
         fn TextOutW(dc:HDC,x:i32,y:i32,text:*const u16,len:i32)->i32;
+        fn CreateCompatibleDC(dc:HDC)->HDC;
+        fn CreateCompatibleBitmap(dc:HDC,width:i32,height:i32)->*mut c_void;
+        fn SelectObject(dc:HDC,obj:*mut c_void)->*mut c_void;
+        fn DeleteObject(obj:*mut c_void)->i32;
+        fn DeleteDC(dc:HDC)->i32;
+        fn BitBlt(dest:HDC,x:i32,y:i32,width:i32,height:i32,src:HDC,src_x:i32,src_y:i32,rop:u32)->i32;
     }
     #[link(name="gdiplus")]
     extern "system" {
@@ -149,8 +159,24 @@ mod win {
         fn GdipFillEllipseI(g:*mut c_void,brush:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
         fn GdipFillPolygonI(g:*mut c_void,brush:*mut c_void,points:*const Point,count:i32,mode:i32)->i32;
         fn GdipDeleteBrush(brush:*mut c_void)->i32;
+        fn GdipTranslateWorldTransform(graphics:*mut c_void,dx:f32,dy:f32,order:i32)->i32;
+        fn GdipRotateWorldTransform(graphics:*mut c_void,angle:f32,order:i32)->i32;
+        fn GdipResetWorldTransform(graphics:*mut c_void)->i32;
     }
     static GLOBAL:OnceLock<Arc<WindowBridge>>=OnceLock::new();
+    thread_local! {static CAMERA_YAW:RefCell<Option<(Instant,f32)>>=RefCell::new(None);}
+    fn smooth_yaw(target:f32)->f32 {
+        CAMERA_YAW.with(|cell|{
+            let mut state=cell.borrow_mut();let now=Instant::now();
+            let angle=if let Some((at,prev))=*state {
+                let delta=(target-prev+540.0).rem_euclid(360.0)-180.0;
+                let secs=now.duration_since(at).as_secs_f32().min(0.2);
+                let weight=1.0-(-12.0*secs).exp();
+                prev+delta*weight
+            }else{target};
+            *state=Some((now,angle));angle
+        })
+    }
     thread_local! {static CACHE:RefCell<NativeMap>=RefCell::new(NativeMap::default());
         static LAST_MAP_CHECK:RefCell<Option<Instant>>=const{RefCell::new(None)};}
     struct NativeMap {image:*mut c_void,name:String,last_try:Option<Instant>}
@@ -209,6 +235,19 @@ mod win {
         let scale=mapdata["scale"].as_f64().unwrap_or(5.) as f32;
         let local=snap.players.iter().find(|p|p.local&&p.life_state=="alive");
         let center=if cfg.center_local {local.map(|p|p.position)} else {None};
+        // Source 2 yaw: 0 degrees east, 90 degrees north.
+        // Transform the map AND the markers so local view points upwards.
+        let camera_angle=if cfg.rotate_with_view {
+            local.and_then(|p|p.yaw).filter(|v|v.is_finite()).map(|yaw|smooth_yaw(yaw-90.0))
+        }else{None};
+        if camera_angle.is_none(){CAMERA_YAW.with(|c|*c.borrow_mut()=None);}
+        if let Some(angle)=camera_angle {
+            unsafe{
+                GdipTranslateWorldTransform(g,-(width as f32)*0.5,-(height as f32)*0.5,1);
+                GdipRotateWorldTransform(g,angle,1);
+                GdipTranslateWorldTransform(g,(width as f32)*0.5,(height as f32)*0.5,1);
+            }
+        }
         let side=(width.min(height)-12).max(1) as f32*cfg.zoom;
         let (left,top)=screen_point([pos_x,pos_y,0.],(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
             .unwrap_or((0.,0.));
@@ -224,6 +263,7 @@ mod win {
             if let Some(yaw)=p.yaw {triangle(g,x,y,yaw.to_radians(),col);}else{fill_circle(g,x as i32,y as i32,6,col);}
             if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32,y as i32-18,4,0xffffcb70);}
         }
+        if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
         let text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
         let _=dc;
@@ -274,15 +314,32 @@ mod win {
                 }}update_window(hwnd);}0
             }
             WM_PAINT=>{
-                let mut paint=Paint::default();let dc=BeginPaint(hwnd,&mut paint);
-                if !dc.is_null(){let mut rect=Rect::default();GetClientRect(hwnd,&mut rect);let mut g=null_mut();
-                    if GdipCreateFromHDC(dc,&mut g)==0 {
-                        if let Some(b)=GLOBAL.get(){overlay_frame(g,dc,rect.right-rect.left,rect.bottom-rect.top,b);}
-                        GdipDeleteGraphics(g);
+                let mut paint=Paint::default();let screen=BeginPaint(hwnd,&mut paint);
+                if !screen.is_null(){
+                    let mut rect=Rect::default();GetClientRect(hwnd,&mut rect);
+                    let w=(rect.right-rect.left).max(1);
+                    let h=(rect.bottom-rect.top).max(1);
+                    let mem=CreateCompatibleDC(screen);
+                    if !mem.is_null(){
+                        let bmp=CreateCompatibleBitmap(screen,w,h);
+                        if !bmp.is_null(){
+                            let old=SelectObject(mem,bmp);
+                            let mut g=null_mut();
+                            if GdipCreateFromHDC(mem,&mut g)==0 {
+                                if let Some(b)=GLOBAL.get(){overlay_frame(g,mem,w,h,b);}
+                                GdipDeleteGraphics(g);
+                            }
+                            SetBkMode(mem,TRANSPARENT);SetTextColor(mem,0x00c9e5ee);
+                            STATUS.with(|s|{let t=wide(&s.borrow());if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}});
+                            // Present completed frame in a single GDI blit.
+                            BitBlt(screen,0,0,w,h,mem,0,0,SRCCOPY);
+                            SelectObject(mem,old);
+                            DeleteObject(bmp);
+                        }
+                        DeleteDC(mem);
                     }
-                    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,0x00c9e5ee);
-                    STATUS.with(|s|{let t=wide(&s.borrow());TextOutW(dc,12,8,t.as_ptr(),(t.len()-1) as i32);});
-                }EndPaint(hwnd,&paint);0
+                }
+                EndPaint(hwnd,&paint);0
             }
             _=>DefWindowProcW(hwnd,msg,wparam,lparam),
         }

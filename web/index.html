@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v0.9 — External Telemetry</title>
+<title>CAS Radar Rust v1.1 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -110,7 +110,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.0</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.1</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
@@ -127,6 +127,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Открыть отдельное окно <input type="checkbox" id="nativeVisible"></label>
     <label class="settings-row">Поверх всех окон <input type="checkbox" id="nativeTop" checked></label>
     <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
+    <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
     <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.5×</span> <input type="range" id="nativeZoom" min="0.7" max="4" step="0.1" value="1.5"></label>
     <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
     <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
@@ -357,7 +358,7 @@ async function updateNativeSettings(){try {
  if(!res.ok)throw Error('HTTP '+res.status);
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter']]) $(id).checked=Boolean(d.settings?.[field]);
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate']]) $(id).checked=Boolean(d.settings?.[field]);
  $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
@@ -376,7 +377,7 @@ function nativeChange(fields){
    $('miniBtn').classList.toggle('active',d.settings.visible);
  }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter']])
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
 $('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
