@@ -35,6 +35,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     let mut last_scan=Instant::now()-Duration::from_secs(10);
     let mut last_map=Instant::now()-Duration::from_secs(10);
     let mut last_detail=Instant::now()-Duration::from_secs(10);
+    let mut last_grenade_scan=Instant::now()-Duration::from_secs(10);
     let mut last_frame=Instant::now();let mut rate=0.;
     let mut cache_details:HashMap<u32,cas_external_radar::model::Player>=HashMap::new();
     let mut cache_grenades:Vec<cas_external_radar::model::GrenadeView>=Vec::new();
@@ -59,20 +60,22 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                     if let Some(map)=reader.current_map(&mut proc,base){if let Ok(mut s)=state.lock(){s.set_map(&map,"memory");}}
                 }
                 let rich=last_detail.elapsed()>=Duration::from_millis(280);
-                let pid=proc.pid;let mut snap=reader.snapshot(&mut proc,base,engine,pid,rich)?;
+                let grenade_scan=last_grenade_scan.elapsed()>=Duration::from_millis(90);
+                let pid=proc.pid;let mut snap=reader.snapshot(&mut proc,base,engine,pid,rich,grenade_scan)?;
+                if grenade_scan{last_grenade_scan=Instant::now();}
                 if rich{
                     cache_details=snap.players.iter().map(|p|(p.id,p.clone())).collect();last_detail=Instant::now();
                 }else{
-                    snap.grenades=cache_grenades.clone();
                     for p in &mut snap.players{if let Some(cached)=cache_details.get(&p.id){
                         p.money=cached.money;p.armor=cached.armor;p.helmet=cached.helmet;p.defuser=cached.defuser;
                         p.weapon=cached.weapon.clone();p.inventory=cached.inventory.clone();p.has_c4=cached.has_c4;
                     }}
                 }
+                if !grenade_scan{snap.grenades=cache_grenades.clone();}
                 let map=state.lock().map(|s|s.current_map().to_owned()).unwrap_or_default();
                 tracker.update(&mut snap,Instant::now(),&map);
                 grenade_tracker.update(&mut snap,Instant::now(),&map);
-                if rich{cache_grenades=snap.grenades.clone();}
+                if grenade_scan{cache_grenades=snap.grenades.clone();}
                 if let Some(m)=snap.local_motion.as_mut(){if m.weapon.is_none(){m.weapon=snap.players.iter().find(|p|p.local).map(|p|p.weapon.clone()).filter(|w|w!="—");}}
                 noise_tracker.update(&mut snap,Instant::now(),&map);
                 let elapsed=tick.duration_since(last_frame).as_secs_f64().max(0.001);

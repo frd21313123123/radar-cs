@@ -196,6 +196,7 @@ mod win {
             *state=Some((now,angle));angle
         })
     }
+    thread_local! {static BOMB_ICON:RefCell<Option<*mut c_void>>=RefCell::new(None);}
     thread_local! {static CACHE:RefCell<NativeMap>=RefCell::new(NativeMap::default());
         static LAST_MAP_CHECK:RefCell<Option<Instant>>=const{RefCell::new(None)};}
     struct NativeMap {image:*mut c_void,name:String,last_try:Option<Instant>}
@@ -263,6 +264,28 @@ mod win {
             for &(x1,y1,x2,y2) in lines{GdipDrawLineI(g,pen,x+x1,y+y1,x+x2,y+y2);}
             GdipDeletePen(pen);
         }
+    }
+
+    fn draw_dropped_c4(g:*mut c_void,x:i32,y:i32,cache:&std::path::Path){
+        let mut rendered=false;
+        BOMB_ICON.with(|slot|{
+            let mut item=slot.borrow_mut();
+            if item.is_none(){
+                let file=cache.join("native_ground_c4_v17.png");
+                let _=std::fs::write(&file,include_bytes!("../assets/bomb_ground.png"));
+                let path=wide(&file.to_string_lossy());
+                let mut image=null_mut();
+                unsafe{if GdipLoadImageFromFile(path.as_ptr(),&mut image)!=0{image=null_mut();}}
+                *item=Some(image);
+            }
+            if let Some(image)=*item{
+                if !image.is_null(){
+                    unsafe{GdipDrawImageRectI(g,image,x-18,y-18,36,36);}
+                    rendered=true;
+                }
+            }
+        });
+        if !rendered {fill_circle(g,x,y,11,0xff1d1610);fill_circle(g,x,y,8,0xffffbc43);}
     }
     fn overlay_frame(g:*mut c_void,dc:HDC,width:i32,height:i32,bridge:&WindowBridge){
         let snap=bridge.state.lock().ok().map(|st|st.snapshot());
@@ -337,29 +360,32 @@ mod win {
         if let Some(bomb)=snap.bomb_world.as_ref(){
             if let Some((x,y))=screen_point(bomb.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
                 let px=x.round() as i32;let py=y.round() as i32;
-                fill_circle(g,px,py,11,0xff1d1610);
-                fill_circle(g,px,py,8,if bomb.status=="planted"{0xfffa514e}else{0xffffbc43});
-                fill_circle(g,px,py,3,0xff241c13);
+
+                if bomb.status=="dropped" {draw_dropped_c4(g,px,py,&bridge.cache);}
+                else {fill_circle(g,px,py,11,0xff261216);fill_circle(g,px,py,8,0xfffa514e);fill_circle(g,px,py,3,0xfff9deac);}
             }
         }
         // Utility overlays are drawn in map coordinates: camera rotation is
         // already active here, so paths and radii follow the map correctly.
         for nade in &snap.grenades{
-            if !((nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire)){continue;}
+            let zone_enabled=(nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire);
+            if !zone_enabled&&!cfg.show_paths{continue;}
             if cfg.show_paths && nade.trajectory.len()>1{
                 let points:Vec<Point>=nade.trajectory.iter().filter_map(|v|
                     screen_point(*v,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
                     .map(|(x,y)|Point{x:x.round() as i32,y:y.round() as i32})).collect();
                 if points.len()>1{unsafe{
                     let mut pen=null_mut();
-                    if GdipCreatePen1(if nade.kind=="smoke"{0xff9ee6ed}else{0xffffa268},2.0,2,&mut pen)==0&&!pen.is_null(){
+                    let ink=match nade.kind.as_str(){"smoke"=>0xff9ee6ed,"molotov"=>0xffffa268,
+                        "flash"=>0xfff6f7ff,"he"=>0xfff66a68,"decoy"=>0xff8def88,_=>0xffc5cbd1};
+                    if GdipCreatePen1(ink,2.0,2,&mut pen)==0&&!pen.is_null(){
                         GdipSetPenDashStyle(pen,2);GdipDrawLinesI(g,pen,points.as_ptr(),points.len() as i32);GdipDeletePen(pen);
                     }
                 }}
             }
             let at=screen_point(nade.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center);
             if let Some((x,y))=at{
-                if nade.state=="active"{
+                if nade.state=="active"&&zone_enabled{
                     let r=(nade.radius_units/(scale*1024.0)*side).clamp(1.0,2000.0);
                     let fire=nade.kind=="molotov";
                     let color=if fire{0x34ff763c}else{0x307bbbd2};
@@ -383,8 +409,10 @@ mod win {
                             }
                         }
                     }
-                }else{
-                    fill_circle(g,x.round() as i32,y.round() as i32,5,if nade.kind=="smoke"{0xff9ee6ed}else{0xffffa268});
+                }else if nade.state=="flying"&&cfg.show_paths{
+                    let ink=match nade.kind.as_str(){"smoke"=>0xff9ee6ed,"molotov"=>0xffffa268,
+                        "flash"=>0xfff6f7ff,"he"=>0xfff66a68,"decoy"=>0xff8def88,_=>0xffc5cbd1};
+                    fill_circle(g,x.round() as i32,y.round() as i32,5,ink);
                 }
             }
         }

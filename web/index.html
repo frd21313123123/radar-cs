@@ -151,6 +151,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 const $=id=>document.getElementById(id);
 const token=new URLSearchParams(location.search).get('token')||'';
 const api=(route)=>route+(route.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
+const droppedC4Icon=new Image();droppedC4Icon.src=api('/api/bomb-icon');
 const radar=$('radar'),ctx=radar.getContext('2d',{alpha:true}),mapBase=$('mapBase'),baseCtx=mapBase.getContext('2d',{alpha:false}),wrap=$('mapWrap');
 let maps={},map='de_mirage',layer='default',autoMapEnabled=true,snapshot={status:'starting',players:[]},mapImg=null,showNames=false,selected=null;
 let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
@@ -275,10 +276,11 @@ function draw(now){requestAnimationFrame(draw);
    }
  }
  for(const g of (snapshot.grenades||[])){
-   if(!((g.kind==='smoke'&&prefs.showSmokes)||(g.kind==='molotov'&&prefs.showFire)))continue;
+   const zoneEnabled=(g.kind==='smoke'&&prefs.showSmokes)||(g.kind==='molotov'&&prefs.showFire);
+   if(!zoneEnabled&&!prefs.showPaths)continue;
    const pos=g.position;
    if(!Array.isArray(pos)||pos.length!==3||!pos.every(Number.isFinite))continue;
-   const fire=g.kind==='molotov',color=fire?'rgba(255,157,96,.93)':'rgba(154,226,241,.94)';
+   const fire=g.kind==='molotov',color=({smoke:'#9ae2f1',molotov:'#ffa268',flash:'#f7f7ff',he:'#f66a68',decoy:'#8def88'}[g.kind]||'#c5cbd1');
    if(prefs.showPaths&&Array.isArray(g.trajectory)&&g.trajectory.length>1){
      const points=g.trajectory.filter(p=>Array.isArray(p)&&p.length===3&&p.every(Number.isFinite)).map(xy);
      if(points.length>1){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([6,5]);
@@ -287,7 +289,7 @@ function draw(now){requestAnimationFrame(draw);
        ctx.stroke();ctx.restore();}
    }
    const p=xy(pos);
-   if(g.state==='active'){
+   if(g.state==='active'&&zoneEnabled){
      const k=Number(mapData().radar_info?.scale),units=Number(g.radius_units);
      if(Number.isFinite(k)&&k>0&&Number.isFinite(units)&&units>0){
        const radius=units/k/1024*size;
@@ -303,7 +305,7 @@ function draw(now){requestAnimationFrame(draw);
          }
        }
      }
-   }else{
+   }else if(g.state==='flying'&&prefs.showPaths){
      ctx.save();ctx.fillStyle=color;ctx.strokeStyle='#111a21';ctx.lineWidth=2;ctx.beginPath();
      ctx.arc(p.x,p.y,6,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
    }
@@ -312,12 +314,17 @@ function draw(now){requestAnimationFrame(draw);
  if(dropped&&Array.isArray(dropped.position)&&dropped.position.length===3
     &&dropped.position.every(Number.isFinite)&&inLayer(dropped.position)){
     const point=xy(dropped.position);
-    ctx.save();ctx.fillStyle=dropped.status==='planted'?'#fa514e':'#ffc04b';
-    ctx.strokeStyle='#241913';ctx.lineWidth=3;
-    ctx.beginPath();ctx.arc(point.x,point.y,10,0,Math.PI*2);ctx.stroke();ctx.fill();
-    ctx.font='900 12px Segoe UI,Arial';ctx.textAlign='center';ctx.textBaseline='middle';
-    const label=dropped.status==='planted'?'C4!':'C4';
-    ctx.strokeText(label,point.x,point.y-20);ctx.fillText(label,point.x,point.y-20);
+    ctx.save();
+    if(dropped.status==='dropped'&&droppedC4Icon.complete&&droppedC4Icon.naturalWidth>0){
+      ctx.drawImage(droppedC4Icon,point.x-19,point.y-19,38,38);
+    }else{
+      ctx.fillStyle=dropped.status==='planted'?'#fa514e':'#ffc04b';
+      ctx.strokeStyle='#241913';ctx.lineWidth=3;
+      ctx.beginPath();ctx.arc(point.x,point.y,10,0,Math.PI*2);ctx.stroke();ctx.fill();
+      ctx.font='900 12px Segoe UI,Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+      const label=dropped.status==='planted'?'C4!':'C4';
+      ctx.strokeText(label,point.x,point.y-20);ctx.fillText(label,point.x,point.y-20);
+    }
     ctx.restore();
  }
  for(const p of people){let xy0=xy(p.position);if(xy0.x<left-30||xy0.x>left+size+30||xy0.y<top-30||xy0.y>top+size+30)continue;

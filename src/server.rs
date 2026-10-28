@@ -98,6 +98,7 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             reply_json(&mut stream,200,serde_json::to_value(snap).unwrap_or(json!({"status":"error"})))
         }
         "/api/overlay"=>reply_json(&mut stream,200,server.overlay.status()),
+        "/api/bomb-icon"=>respond(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png"),
         "/api/maps"=>{
             let maps=server.state.lock().map(|s|s.maps.clone()).map_err(|_|std::io::Error::other("poisoned state"))?;
             reply_json(&mut stream,200,maps)
@@ -116,5 +117,6 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn bomb_png_embedded(){assert!(include_bytes!("../assets/bomb_ground.png").starts_with(b"\x89PNG\r\n\x1a\n"));}
     #[test]fn auth_query(){assert_eq!(query_arg("map=de_nuke&token=hello","token"),Some("hello"));assert_eq!(query_arg("token=bad","token"),Some("bad"));}
 }

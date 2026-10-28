@@ -81,6 +81,7 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub bomb_world: Option<BombWorld>,
     #[serde(default)] pub grenades:Vec<GrenadeView>,
+    #[serde(default)] pub grenades_read:bool,
     pub bomb_carrier_source: Option<String>,
     pub c4_unowned: bool,
     pub c4_global_owner_id: Option<u32>,
@@ -124,7 +125,7 @@ impl Snapshot {
     pub fn status(status: &str, message: &str) -> Self {
         Self {
             status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(), observer_view:None,
-            bomb_carrier_id: None, bomb_world: None, grenades:Vec::new(), bomb_carrier_source: None, c4_unowned: false,
+            bomb_carrier_id: None, bomb_world: None, grenades:Vec::new(), grenades_read:false, bomb_carrier_source: None, c4_unowned: false,
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
@@ -188,6 +189,7 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
             weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None});
     }
     Snapshot { status:"demo".into(),local_team:3,players,
+        grenades_read:true,
         grenades:vec![
           GrenadeView{id:1001,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![]},
           GrenadeView{id:1002,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]]},

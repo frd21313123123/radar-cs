@@ -198,13 +198,16 @@ impl CS2Reader {
         if carried.is_some(){(carried,None,false,checked)}
         else {(None,dropped,ownerless,checked)}
     }
+    /// Source 2 designer-name classification, including short-lived throws.
     fn grenade_class(name:&str)->Option<&'static str>{
-        match name {
-            "smokegrenade_projectile"=>Some("smoke"),
-            "molotov_projectile"|"incendiarygrenade_projectile"=>Some("molotov"),
-            "inferno"=>Some("inferno"),
-            _=>None,
-        }
+        let n=name.trim_start_matches("c_");
+        if n=="inferno"{Some("inferno")}
+        else if n.contains("smokegrenade_projectile"){Some("smoke")}
+        else if n.contains("molotov_projectile")||n.contains("incendiarygrenade_projectile"){Some("molotov")}
+        else if n.contains("flashbang_projectile"){Some("flash")}
+        else if n.contains("hegrenade_projectile")||n.contains("fraggrenade_projectile"){Some("he")}
+        else if n.contains("decoy_projectile"){Some("decoy")}
+        else{None}
     }
     fn grenade_trail<M:Memory>(&self,p:&mut M,entity:u64)->Vec<[f32;3]>{
         let off=match self.schema.field("C_BaseCSGrenadeProjectile","m_arrTrajectoryTrailPoints"){Some(v)=>v,None=>return vec![]};
@@ -282,7 +285,17 @@ impl CS2Reader {
                             self.schema.field("C_SmokeGrenadeProjectile","m_vSmokeDetonationPos")
                                 .and_then(|o|p.vec3(ptr+o)).filter(|v|*v!=[0.,0.,0.]).unwrap_or(pos)
                         }else{pos};
-                        let points=if active{vec![]}else{self.grenade_trail(p,ptr)};
+                        let mut points=if active{vec![]}else{self.grenade_trail(p,ptr)};
+                        // Seed the first visible segment from the actual throw
+                        // origin, even for short-lived HE and flash projectiles.
+                        if !active&&points.is_empty(){
+                            let initial=self.schema.field("C_BaseCSGrenadeProjectile","m_vInitialPosition")
+                                .and_then(|o|p.vec3(ptr+o))
+                                .filter(|v|v.iter().all(|x|x.is_finite()&&x.abs()<100000.)&&*v!=[0.,0.,0.]);
+                            if let Some(from)=initial{
+                                if (from[0]-pos[0]).hypot(from[1]-pos[1])>20.0{points.extend([from,pos]);}
+                            }
+                        }
                         out.push(GrenadeView{id:index,kind:kind.into(),state:if active{"active"}else{"flying"}.into(),
                             position,radius_units:if kind=="smoke"{160.}else{135.},trajectory:points,fire_cells:vec![]});
                     }
@@ -355,7 +368,7 @@ impl CS2Reader {
         let strptr=p.u64(ptr+0x180);if strptr==0{return None;}
         let map=p.cstr(strptr,96);normalize_map_name(&map)
     }
-    pub fn snapshot<M:Memory>(&mut self,p:&mut M,base:u64,engine:u64,pid:u32,details:bool)->Result<Snapshot,String>{
+    pub fn snapshot<M:Memory>(&mut self,p:&mut M,base:u64,engine:u64,pid:u32,details:bool,grenade_scan:bool)->Result<Snapshot,String>{
         let start=Instant::now();self.chunk_cache.clear();
         let before_read=p.read_count();let before_fail=p.fail_count();
         let mut diag=Diagnostics::default();
@@ -488,7 +501,7 @@ impl CS2Reader {
         let observer_view=self.read_observer_view(p,list,local,local_pawn,&pawns);
         diag.set("observer_target_found",json!(observer_view.is_some()));
         diag.set("observer_mode",json!(observer_view.as_ref().map(|v|v.mode)));
-        let grenades=if details{self.scan_grenades(p,list,&mut diag)}else{vec![]};
+        let grenades=if grenade_scan{self.scan_grenades(p,list,&mut diag)}else{vec![]};
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
         diag.set("c4_global_unowned",json!(if unowned {1}else{0}));
@@ -523,7 +536,21 @@ impl CS2Reader {
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,
             bomb_carrier_id:if bomb_world.is_some(){None}else{global_owner.or_else(||unique_bomb_carrier(&players))},
-            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,observer_view,details_read:details,
+            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,grenades_read:grenade_scan,observer_view,details_read:details,
             local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
+}
+#[cfg(test)]mod projectile_name_tests {
+ use super::CS2Reader;
+ #[test]fn all_grenade_projectiles(){
+  for (name,kind) in [
+   ("smokegrenade_projectile","smoke"),("molotov_projectile","molotov"),
+   ("incendiarygrenade_projectile","molotov"),("flashbang_projectile","flash"),
+   ("hegrenade_projectile","he"),("decoy_projectile","decoy"),
+   ("inferno","inferno"),("c_hegrenade_projectile","he")
+  ]{
+   assert_eq!(CS2Reader::grenade_class(name),Some(kind));
+  }
+  assert_eq!(CS2Reader::grenade_class("weapon_flashbang"),None);
+ }
 }
