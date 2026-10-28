@@ -1,5 +1,5 @@
 //! Source 2 read-only, best-effort controller/pawn reader.
-use crate::model::{BombWorld, Diagnostics, GrenadeView, ObserverView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
+use crate::model::{BombWorld, BombTimer, Diagnostics, GrenadeView, ObserverView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
 use serde_json::{json, Value};
@@ -113,6 +113,34 @@ impl CS2Reader {
         (active_name,inventory,if has_c4{Some(true)}else if complete{Some(false)}else{None})
     }
 
+    /// Use Source 2 game-time rather than "40 seconds since detected".
+    /// GlobalVars.curtime is at +0x30 on the current CS2 client layout.
+    /// An invalid/missing clock leaves the indicator hidden instead of
+    /// showing an invented countdown.
+    fn planted_c4_timer<M:Memory>(&self,p:&mut M,base:u64)->Option<BombTimer>{
+        let ptr=p.u64(base+self.schema.offset("dwPlantedC4")?);
+        if ptr<0x10000{return None;}
+        let field=|name:&str|self.schema.field("C_PlantedC4",name);
+        let ticking=field("m_bBombTicking").and_then(|o|try_u8(p,ptr+o))==Some(1);
+        if !ticking{return None;}
+        if field("m_bBombDefused").and_then(|o|try_u8(p,ptr+o))==Some(1)
+            || field("m_bHasExploded").and_then(|o|try_u8(p,ptr+o))==Some(1) {
+            return None;
+        }
+        let mut read_f32=|addr:u64|p.read(addr,4)
+            .and_then(|bytes|bytes.try_into().ok())
+            .map(f32::from_le_bytes)
+            .filter(|v|v.is_finite());
+        let blow=read_f32(ptr+field("m_flC4Blow")?)?;
+        let total=read_f32(ptr+field("m_flTimerLength")?)?;
+        let gamevars=p.u64(base+self.schema.offset("dwGlobalVars")?);
+        if gamevars<0x10000{return None;}
+        // Read actual client game time. This field is not schema-reflected.
+        let current=read_f32(gamevars+0x30)?;
+        let site=field("m_nBombSite").and_then(|o|try_i32(p,ptr+o)).unwrap_or(-1);
+        let defusing=field("m_bBeingDefused").and_then(|o|try_u8(p,ptr+o))==Some(1);
+        BombTimer::from_game_time(site,blow,current,total,defusing)
+    }
     /// Locate C4 by the global pointer AND the entity list: the global
     /// pointer alone may represent only the local player's equipped C4.
     /// A world marker requires a real ownerless C4 entity and valid position.
@@ -376,6 +404,8 @@ impl CS2Reader {
         let list=p.u64(base+list_off);if list==0{return Err("dwEntityList empty; loading scene or invalid offsets".into());}
         let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
+        let bomb_timer=self.planted_c4_timer(p,base);
+        diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
         diag.set("local_controller_found",json!(if local!=0 {1}else{0}));
         diag.set("local_pawn_found",json!(if local_pawn!=0 {1}else{0}));
         self.probe_layout(p,list,base+list_off,local);self.chunk_cache.clear();
@@ -536,7 +566,7 @@ impl CS2Reader {
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,
             bomb_carrier_id:if bomb_world.is_some(){None}else{global_owner.or_else(||unique_bomb_carrier(&players))},
-            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,grenades_read:grenade_scan,observer_view,details_read:details,
+            bomb_world,bomb_timer,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,grenades_read:grenade_scan,observer_view,details_read:details,
             local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
 }

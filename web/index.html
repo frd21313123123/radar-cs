@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v1.4 — External Telemetry</title>
+<title>CAS Radar Rust v1.8 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -98,6 +98,21 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 .native-overlay-panel p{font-size:11px}
 .settings-box{max-height:min(90dvh,750px);overflow-y:auto}
 @media(max-width:650px){.native-overlay-head{flex-wrap:wrap}}
+
+.bomb-countdown[hidden]{display:none!important}
+.bomb-countdown{position:absolute;z-index:7;top:65px;left:15px;display:flex;align-items:center;gap:7px;
+  width:158px;min-height:62px;padding:6px 8px 6px 5px;background:rgba(11,16,22,.96);
+  box-shadow:0 5px 16px rgba(0,0,0,.42);border:1px solid #273641;border-radius:9px;
+  color:#eef5f8;font:11px/1.45 'Segoe UI',Arial,sans-serif;font-variant-numeric:tabular-nums;
+  pointer-events:none}
+.bomb-ring{position:relative;width:45px;height:45px;flex:none;display:grid;place-items:center}
+.bomb-ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.bomb-ring circle{fill:none;stroke-width:4;stroke-linecap:round}
+.bomb-ring .track{stroke:#2b3946}.bomb-ring .progress{stroke:#25c5ef;transition:stroke .2s}
+.bomb-ring .bomb-symbol{font-size:18px;color:#edf6f8}
+.bomb-fields{flex:1;min-width:0}.bomb-fields div{white-space:nowrap}
+.bomb-fields b{color:#38d3f4;font-weight:750}
+@media(max-width:650px){.bomb-countdown{top:63px;left:8px;transform:scale(.88);transform-origin:top left}}
 </style></head>
 <body><div class="layout">
 <header><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/></svg></div><div><div class="brand-name">CAS<span style="color:var(--aqua)">.</span>RADAR</div><div class="brand-caption">EXTERNAL <strong>READ-ONLY</strong> TELEMETRY</div></div></div><div class="pills"><div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">CONNECTING</span></div><div class="pill demo" id="demoPill" style="display:none">SIMULATION MODE</div><div class="pill"><span>PLAYERS</span><b id="playerCount">00</b></div><div class="pill mono" title="Фактическая частота отрисовки / чтения данных"><b id="fpsHud">FPS —</b><span id="sourceHud">DATA — Hz</span></div></div></header>
@@ -105,12 +120,21 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on t" id="tButton">TERRORISTS <span class="number" id="tCount">0</span></button></div><input class="filter" id="search" placeholder="Поиск по игрокам…" autocomplete="off"></div>
 <div class="team-status" id="tStatus">Состав команды · T</div><div id="tPlayers" class="players"></div>
 </aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Mirage</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="de_mirage">Mirage</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select"><option value="default">UPPER</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
-<div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar"></canvas><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
+<div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar"></canvas>
+<div class="bomb-countdown" id="bombTimerPanel" hidden aria-label="Время до взрыва C4">
+  <div class="bomb-ring"><svg viewBox="0 0 48 48" aria-hidden="true">
+    <circle class="track" cx="24" cy="24" r="20"></circle>
+    <circle class="progress" id="bombTimerProgress" cx="24" cy="24" r="20"></circle>
+  </svg><span class="bomb-symbol">▣</span></div>
+  <div class="bomb-fields"><div>Сайт: <b id="bombTimerSite">?</b></div>
+    <div>ХП: <b id="bombTimerHp">—</b></div>
+    <div>Время: <b id="bombTimerSecs">—</b> сек</div></div>
+</div><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
 <div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">SCROLL TO ZOOM · DRAG TO PAN · CLICK TO INSPECT</span></div></section><aside class="side-column side-ct" aria-label="Спецназ">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.4</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.8</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
@@ -123,6 +147,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   <label class="settings-row">Показывать направление взгляда <input type="checkbox" id="showDirection" checked></label>
   <label class="settings-row">Круг шума на веб-карте <input type="checkbox" id="showNoise" checked></label>
   <label class="settings-row">Подписи плэнтов A / B на веб-карте <input type="checkbox" id="showSites" checked></label>
+  <label class="settings-row">Таймер C4 на большой карте <input type="checkbox" id="showBombTimer" checked></label>
   <label class="settings-row">Зоны смоков <input type="checkbox" id="showSmokes" checked></label>
   <label class="settings-row">Зоны молотовых <input type="checkbox" id="showFire" checked></label>
   <label class="settings-row">Пунктирный путь гранат <input type="checkbox" id="showPaths" checked></label>
@@ -136,6 +161,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
     <label class="settings-row">Круг шума на миникарте <input type="checkbox" id="nativeNoise" checked></label>
     <label class="settings-row">Подписи плэнтов A / B на миникарте <input type="checkbox" id="nativeSites" checked></label>
+    <label class="settings-row">Таймер C4 на миникарте <input type="checkbox" id="nativeBombTimer" checked></label>
     <label class="settings-row">Смоки в миникарте <input type="checkbox" id="nativeSmokes" checked></label>
     <label class="settings-row">Молотовы в миникарте <input type="checkbox" id="nativeFire" checked></label>
     <label class="settings-row">Пунктир гранат в миникарте <input type="checkbox" id="nativePaths" checked></label>
@@ -158,16 +184,16 @@ let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='';
-const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true};
+const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true};
 let prefs={...DEFAULT_PREFS};
 const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
 function loadPrefs(){try{const saved=JSON.parse(localStorage.getItem('cas-radar-v06-settings')||'{}');
   for(const name of ['friend','enemy','own'])if(validHex(saved[name]))prefs[name]=saved[name];
-  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites','showSmokes','showFire','showPaths'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
+  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites','showSmokes','showFire','showPaths','showBombTimer'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
 }catch(_){ }applyPrefs();}
 function applyPrefs(){for(const name of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+name,prefs[name]);
   for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']])$(id).value=prefs[key];
-  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths']])$(id).checked=prefs[key];
+  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths'],['showBombTimer','showBombTimer']])$(id).checked=prefs[key];
   lastListKey='';}
 function localTeam(){let t=Number(snapshot.local_team);if(t===2||t===3)return t;
   const me=(snapshot.players||[]).find(p=>p.local);return me?.team||0;}
@@ -241,9 +267,34 @@ function acceptSnapshot(data){
 function smoothedYaw(p,now){const m=motions.get(p.id);if(!m||!Number.isFinite(m.toYaw)||!Number.isFinite(m.fromYaw))return p.yaw;
  return m.fromYaw+shortestYawDelta(m.fromYaw,m.toYaw)*Math.max(0,Math.min(1,(now-m.at)/motionMs));}
 function smoothShown(now){return shown().filter(p=>p.position).map(p=>({...p,position:smoothedPosition(p,now),yaw:smoothedYaw(p,now)}));}
+function updateBombCountdown(){
+ const panel=$('bombTimerPanel'),bomb=snapshot.bomb_timer;
+ if(!prefs.showBombTimer||!bomb||!Number.isFinite(bomb.remaining_secs)
+   ||!Number.isFinite(bomb.total_secs)||bomb.total_secs<=0){
+   panel.hidden=true;return;
+ }
+ // Server snapshot is timestamped on the same machine; animate at RAF rate.
+ const age=Math.max(0,Math.min(.75,Date.now()/1000-Number(snapshot.time||0)));
+ const seconds=Math.max(0,bomb.remaining_secs-age);
+ if(seconds<=0){panel.hidden=true;return;}
+ panel.hidden=false;
+ $('bombTimerSite').textContent=bomb.site||'?';
+ const local=(snapshot.players||[]).find(p=>p.local&&p.life_state==='alive');
+ const watchedId=snapshot.observer_view?.player_id;
+ const watched=(snapshot.players||[]).find(p=>p.id===watchedId);
+ const hp=local?.health??watched?.health;
+ $('bombTimerHp').textContent=Number.isFinite(hp)?String(hp):'—';
+ $('bombTimerSecs').textContent=seconds.toFixed(1);
+ const fraction=Math.max(0,Math.min(1,seconds/bomb.total_secs));
+ const perimeter=2*Math.PI*20;
+ const arc=$('bombTimerProgress');
+ arc.style.strokeDasharray=String(perimeter);
+ arc.style.strokeDashoffset=String(perimeter*(1-fraction));
+ arc.style.stroke=seconds<=5?'#ff6170':seconds<=10?'#ffb45b':'#25c5ef';
+}
 function draw(now){requestAnimationFrame(draw);
  if(now-lastDraw<16)return;
- lastDraw=now;fpsFrames++;
+ lastDraw=now;updateBombCountdown();fpsFrames++;
  if(now-fpsBegin>=1000){$('fpsHud').textContent='FPS '+Math.round(fpsFrames*1000/(now-fpsBegin));fpsFrames=0;fpsBegin=now;}
  renderBackground();
  const w=rect.width,h=rect.height;ctx.clearRect(0,0,w,h);
@@ -450,7 +501,7 @@ async function updateNativeSettings(){try {
  if(!res.ok)throw Error('HTTP '+res.status);
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']]) $(id).checked=Boolean(d.settings?.[field]);
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']]) $(id).checked=Boolean(d.settings?.[field]);
  $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
@@ -469,7 +520,7 @@ function nativeChange(fields){
    $('miniBtn').classList.toggle('active',d.settings.visible);
  }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']])
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
 $('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
@@ -486,7 +537,7 @@ for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','o
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
     if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});}});
 }
-for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths']]){
+for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths'],['showBombTimer','showBombTimer']]){
   $(id).addEventListener('change',e=>{prefs[key]=e.target.checked;applyPrefs();
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
 }

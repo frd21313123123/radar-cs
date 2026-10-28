@@ -69,6 +69,29 @@ pub struct RadarFocus {
     pub name: String,
     pub spectating: bool,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BombTimer {
+    /// Bombsite reported by the planted C4 entity, never inferred from map location.
+    pub site: Option<String>,
+    /// Remaining game-time seconds at snapshot.time; client interpolates until next frame.
+    pub remaining_secs: f32,
+    pub total_secs: f32,
+    pub being_defused: bool,
+}
+impl BombTimer {
+    pub fn from_game_time(site:i32, blow:f32, current:f32, total:f32, being_defused:bool)->Option<Self>{
+        if !blow.is_finite() || !current.is_finite() || !total.is_finite()
+            || !(10.0..=180.0).contains(&total) || current<0.0
+            || current<blow-total-2.0 || current>=blow
+            || blow-current>total+2.0 {return None;}
+        Some(Self{
+            site:match site{0=>Some("A".into()),1=>Some("B".into()),_=>None},
+            remaining_secs:(blow-current).clamp(0.0,total),
+            total_secs:total,
+            being_defused,
+        })
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub status: String,
@@ -80,6 +103,8 @@ pub struct Snapshot {
     pub bomb_carrier_id: Option<u32>,
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub bomb_world: Option<BombWorld>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub bomb_timer: Option<BombTimer>,
     #[serde(default)] pub grenades:Vec<GrenadeView>,
     #[serde(default)] pub grenades_read:bool,
     pub bomb_carrier_source: Option<String>,
@@ -125,7 +150,7 @@ impl Snapshot {
     pub fn status(status: &str, message: &str) -> Self {
         Self {
             status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(), observer_view:None,
-            bomb_carrier_id: None, bomb_world: None, grenades:Vec::new(), grenades_read:false, bomb_carrier_source: None, c4_unowned: false,
+            bomb_carrier_id: None, bomb_world: None, bomb_timer:None, grenades:Vec::new(), grenades_read:false, bomb_carrier_source: None, c4_unowned: false,
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
@@ -248,6 +273,19 @@ mod tests {
             name:"Other".into(),position:[50.,50.,50.],yaw:Some(90.),mode:4});
         let f=s.radar_focus(true).unwrap();
         assert!(!f.spectating);assert_eq!(f.name,"demo-user");
+    }
+    #[test] fn bomb_timer_game_time_and_sites(){
+        let a=BombTimer::from_game_time(0,120.0,95.6,40.0,false).unwrap();
+        assert_eq!(a.site.as_deref(),Some("A"));
+        assert!((a.remaining_secs-24.4).abs()<0.001);
+        let b=BombTimer::from_game_time(1,50.0,15.0,40.0,true).unwrap();
+        assert_eq!(b.site.as_deref(),Some("B"));assert!(b.being_defused);
+        assert!(BombTimer::from_game_time(99,50.0,12.0,40.0,false).unwrap().site.is_none());
+    }
+    #[test] fn bomb_timer_rejects_expired_or_invalid_values(){
+        assert!(BombTimer::from_game_time(0,100.0,100.0,40.0,false).is_none());
+        assert!(BombTimer::from_game_time(0,100.0,30.0,40.0,false).is_none());
+        assert!(BombTimer::from_game_time(0,100.0,f32::NAN,40.0,false).is_none());
     }
     #[test] fn json_browser_contract(){
         let v=serde_json::to_value(demo_snapshot(1.)).unwrap();

@@ -35,6 +35,7 @@ pub struct OverlaySettings {
     pub show_smokes: bool,
     pub show_fire: bool,
     pub show_paths: bool,
+    pub show_bomb_timer: bool,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -42,14 +43,14 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,show_bomb_timer:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","follow_spectator","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","follow_spectator","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","show_bomb_timer","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
@@ -60,6 +61,7 @@ impl OverlaySettings {
         if let Some(x)=o.get("show_smokes"){self.show_smokes=x.as_bool().ok_or("show_smokes must be boolean")?;}
         if let Some(x)=o.get("show_fire"){self.show_fire=x.as_bool().ok_or("show_fire must be boolean")?;}
         if let Some(x)=o.get("show_paths"){self.show_paths=x.as_bool().ok_or("show_paths must be boolean")?;}
+        if let Some(x)=o.get("show_bomb_timer"){self.show_bomb_timer=x.as_bool().ok_or("show_bomb_timer must be boolean")?;}
         if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
@@ -169,6 +171,8 @@ mod win {
         fn GdipDrawImageRectI(graphics:*mut c_void,image:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
         fn GdipCreateSolidFill(color:u32,brush:*mut *mut c_void)->i32;
         fn GdipFillEllipseI(g:*mut c_void,brush:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
+        fn GdipFillRectangleI(g:*mut c_void,brush:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
+        fn GdipDrawArcI(g:*mut c_void,pen:*mut c_void,x:i32,y:i32,w:i32,h:i32,start_angle:f32,sweep_angle:f32)->i32;
         fn GdipFillPolygonI(g:*mut c_void,brush:*mut c_void,points:*const Point,count:i32,mode:i32)->i32;
         fn GdipDeleteBrush(brush:*mut c_void)->i32;
         fn GdipCreatePen1(color:u32,width:f32,unit:i32,pen:*mut *mut c_void)->i32;
@@ -286,6 +290,30 @@ mod win {
             }
         });
         if !rendered {fill_circle(g,x,y,11,0xff1d1610);fill_circle(g,x,y,8,0xffffbc43);}
+    }
+    /// Styled after the supplied compact CS2 panel: dark backdrop, cyan ring.
+    /// Called AFTER the world transform is reset, so the panel does not rotate.
+    fn draw_bomb_panel(g:*mut c_void,remaining:f32,total:f32){
+        if !remaining.is_finite()||!total.is_finite()||total<=0.0{return;}
+        unsafe{
+            let panel=brush(g,0xf10c1117);
+            if !panel.is_null(){
+                GdipFillRectangleI(g,panel,10,32,151,65);
+                GdipDeleteBrush(panel);
+            }
+            let mut track=null_mut();
+            if GdipCreatePen1(0xff293743,3.4,2,&mut track)==0&&!track.is_null(){
+                GdipDrawEllipseI(g,track,21,44,39,39);
+                GdipDeletePen(track);
+            }
+            let color=if remaining<=5.0{0xffff5f70}
+                else if remaining<=10.0{0xffffb55b}else{0xff25c5ef};
+            let mut progress=null_mut();
+            if GdipCreatePen1(color,3.5,2,&mut progress)==0&&!progress.is_null(){
+                GdipDrawArcI(g,progress,21,44,39,39,-90.0,360.0*(remaining/total).clamp(0.0,1.0));
+                GdipDeletePen(progress);
+            }
+        }
     }
     fn overlay_frame(g:*mut c_void,dc:HDC,width:i32,height:i32,bridge:&WindowBridge){
         let snap=bridge.state.lock().ok().map(|st|st.snapshot());
@@ -426,6 +454,22 @@ mod win {
             if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32,y as i32-18,4,0xffffcb70);}
         }
         if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
+        let bomb_lines=if cfg.show_bomb_timer {
+            snap.bomb_timer.as_ref().and_then(|timer|{
+                let age=(crate::model::now_secs()-snap.time).clamp(0.0,0.75) as f32;
+                let remaining=(timer.remaining_secs-age).max(0.0);
+                if remaining<=0.0 {return None;}
+                draw_bomb_panel(g,remaining,timer.total_secs);
+                let site=timer.site.as_deref().unwrap_or("?");
+                let hp=snap.players.iter().find(|p|p.local&&p.life_state=="alive")
+                    .or_else(||snap.observer_view.as_ref().and_then(|o|
+                        o.player_id.and_then(|id|snap.players.iter().find(|p|p.id==id))))
+                    .and_then(|p|p.health).map(|hp|hp.to_string()).unwrap_or_else(||"—".into());
+                Some([format!("Сайт: {site}"),format!("ХП: {hp}"),
+                    format!("Время: {remaining:.1} сек")])
+            })
+        }else{None};
+        BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
         let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
         if cfg.follow_spectator {
@@ -438,6 +482,7 @@ mod win {
         STATUS.with(|s|{*s.borrow_mut()=text;});
     }
     thread_local!{static STATUS:RefCell<String>=const{RefCell::new(String::new())};}
+    thread_local!{static BOMB_LINES:RefCell<Option<[String;3]>>=const{RefCell::new(None)};}
     unsafe fn update_window(hwnd:HWND){
         let bridge=match GLOBAL.get(){Some(b)=>b,None=>return};
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
@@ -499,6 +544,16 @@ mod win {
                             }
                             SetBkMode(mem,TRANSPARENT);SetTextColor(mem,0x00c9e5ee);
                             STATUS.with(|s|{let t=wide(&s.borrow());if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}});
+                            BOMB_LINES.with(|data|{
+                                if let Some(lines)=data.borrow().as_ref(){
+                                    SetTextColor(mem,0x00ebeff7);
+                                    let mark=wide("▣");TextOutW(mem,32,57,mark.as_ptr(),(mark.len()-1) as i32);
+                                    for (i,line) in lines.iter().enumerate(){
+                                        let t=wide(line);TextOutW(mem,66,34+(i as i32)*19,t.as_ptr(),(t.len()-1) as i32);
+                                    }
+                                    SetTextColor(mem,0x00c9e5ee);
+                                }
+                            });
                             // Present completed frame in a single GDI blit.
                             BitBlt(screen,0,0,w,h,mem,0,0,SRCCOPY);
                             SelectObject(mem,old);
@@ -543,6 +598,10 @@ mod win {
         assert!(s.update(&json!({"follow_spectator":"yes"})).is_err());
     }
     #[test]fn validate(){let mut s=OverlaySettings::default();assert!(s.update(&json!({"zoom":2.0,"visible":true,"self_color":"#00ffbb"})).is_ok());assert!(s.visible);assert!((s.zoom-2.).abs()<0.01);assert!(s.update(&json!({"zoom":20})).is_err());assert!(s.update(&json!({"self_color":"red"})).is_err());}
+    #[test]fn timer_toggle(){let mut s=OverlaySettings::default();assert!(s.show_bomb_timer);
+        assert!(s.update(&json!({"show_bomb_timer":false})).is_ok());
+        assert!(!s.show_bomb_timer);
+        assert!(s.update(&json!({"show_bomb_timer":"no"})).is_err());}
     #[test]fn site_toggle(){let mut s=OverlaySettings::default();assert!(s.show_sites);assert!(s.update(&json!({"show_sites":false})).is_ok());assert!(!s.show_sites);assert!(s.update(&json!({"show_sites":"yes"})).is_err());}
     #[test]fn follow_centers_me(){let map=(-3230.,1713.,5.);let me=[-1500.,500.,5.];
         let p=screen_point(me,map,360.,500.,1.6,Some(me)).unwrap();
