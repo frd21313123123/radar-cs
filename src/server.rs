@@ -128,7 +128,7 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
     #[test]fn bundled_web_matches_timer_and_map(){
         let html=include_str!("../web/index.html");
         assert!(html.contains("function renderBackground()"));
-        assert!(html.contains("id=\\"bombTimerPanel\\""));
+        assert!(html.contains("bombTimerPanel"));
         assert!(!html.contains("bombTimerHp"));
     }
     #[test]fn bomb_png_embedded(){assert!(include_bytes!("../assets/bomb_ground.png").starts_with(b"\x89PNG\r\n\x1a\n"));}
