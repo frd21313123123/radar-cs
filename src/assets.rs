@@ -106,9 +106,9 @@ pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Resu
     #[test]fn no_sites_on_hostage_maps(){assert!(bombsites_for_map("cs_office").is_none());assert!(bombsites_for_map("de_unknown").is_none());}
     #[test]fn injected_into_offline_and_online_metadata(){
         let offline=fallback_maps();
-        assert_eq!(offline["maps"]["de_mirage"]["bombsites"]["A"]["x"],0.54);
+        assert!((offline["maps"]["de_mirage"]["bombsites"]["A"]["x"].as_f64().unwrap()-0.54).abs()<0.00001);
         let online=with_bombsites(json!({"maps":{"de_cache":{"display_name":"Cache"},"cs_office":{"display_name":"Office"}}}));
-        assert_eq!(online["maps"]["de_cache"]["bombsites"]["B"]["y"],0.79);
+        assert!((online["maps"]["de_cache"]["bombsites"]["B"]["y"].as_f64().unwrap()-0.79).abs()<0.00001);
         assert!(online["maps"]["cs_office"].get("bombsites").is_none());
     }
     #[test]fn sites_fit_overview_image(){for name in ["de_mirage","de_dust2","de_inferno","de_ancient","de_anubis","de_nuke","de_train","de_vertigo","de_overpass","de_cache"]{
