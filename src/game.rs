@@ -18,6 +18,10 @@ fn weapon_name(id:u16)->String {
 fn field(s:&Schema,k:&str,n:&str)->Result<u64,String>{s.field(k,n).ok_or(format!("missing field {k}.{n}"))}
 fn try_i32<M:Memory>(p:&mut M,addr:u64)->Option<i32>{p.read(addr,4).and_then(|v|v.try_into().ok()).map(i32::from_le_bytes)}
 fn try_u8<M:Memory>(p:&mut M,addr:u64)->Option<u8>{p.read(addr,1).and_then(|v|v.first().copied())}
+fn try_f32<M:Memory>(p:&mut M,addr:u64)->Option<f32>{
+    p.read(addr,4).and_then(|bytes|bytes.try_into().ok())
+        .map(f32::from_le_bytes).filter(|v|v.is_finite())
+}
 fn opt_u64<M:Memory>(p:&mut M,ptr:u64,offset:Option<u64>)->u64{if ptr>0{offset.map_or(0,|o|p.u64(ptr+o))}else{0}}
 fn opt_i32<M:Memory>(p:&mut M,ptr:u64,offset:Option<u64>)->Option<i32>{if ptr>0{offset.and_then(|o|try_i32(p,ptr+o))}else{None}}
 
@@ -127,16 +131,12 @@ impl CS2Reader {
             || field("m_bHasExploded").and_then(|o|try_u8(p,ptr+o))==Some(1) {
             return None;
         }
-        let mut read_f32=|addr:u64|p.read(addr,4)
-            .and_then(|bytes|bytes.try_into().ok())
-            .map(f32::from_le_bytes)
-            .filter(|v|v.is_finite());
-        let blow=read_f32(ptr+field("m_flC4Blow")?)?;
-        let total=read_f32(ptr+field("m_flTimerLength")?)?;
+        let blow=try_f32(p,ptr+field("m_flC4Blow")?)?;
+        let total=try_f32(p,ptr+field("m_flTimerLength")?)?;
         let gamevars=p.u64(base+self.schema.offset("dwGlobalVars")?);
         if gamevars<0x10000{return None;}
         // Read actual client game time. This field is not schema-reflected.
-        let current=read_f32(gamevars+0x30)?;
+        let current=try_f32(p,gamevars+0x30)?;
         let site=field("m_nBombSite").and_then(|o|try_i32(p,ptr+o)).unwrap_or(-1);
         let defusing=field("m_bBeingDefused").and_then(|o|try_u8(p,ptr+o))==Some(1);
         BombTimer::from_game_time(site,blow,current,total,defusing)
