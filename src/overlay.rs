@@ -28,6 +28,7 @@ pub struct OverlaySettings {
     pub visible: bool,
     pub topmost: bool,
     pub center_local: bool,
+    pub follow_spectator: bool,
     pub rotate_with_view: bool,
     pub show_noise: bool,
     pub show_sites: bool,
@@ -41,17 +42,18 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","follow_spectator","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
+        if let Some(x)=o.get("follow_spectator"){self.follow_spectator=x.as_bool().ok_or("follow_spectator must be boolean")?;}
         if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
         if let Some(x)=o.get("show_noise"){self.show_noise=x.as_bool().ok_or("show_noise must be boolean")?;}
         if let Some(x)=o.get("show_sites"){self.show_sites=x.as_bool().ok_or("show_sites must be boolean")?;}
@@ -180,7 +182,8 @@ mod win {
         fn GdipResetWorldTransform(graphics:*mut c_void)->i32;
     }
     static GLOBAL:OnceLock<Arc<WindowBridge>>=OnceLock::new();
-    thread_local! {static CAMERA_YAW:RefCell<Option<(Instant,f32)>>=RefCell::new(None);}
+    thread_local! {static CAMERA_YAW:RefCell<Option<(Instant,f32)>>=RefCell::new(None);
+        static CAMERA_FOCUS_ID:RefCell<Option<(bool,u32)>>=RefCell::new(None);}
     fn smooth_yaw(target:f32)->f32 {
         CAMERA_YAW.with(|cell|{
             let mut state=cell.borrow_mut();let now=Instant::now();
@@ -273,11 +276,20 @@ mod win {
         let pos_y=mapdata["pos_y"].as_f64().unwrap_or(1713.) as f32;
         let scale=mapdata["scale"].as_f64().unwrap_or(5.) as f32;
         let local=snap.players.iter().find(|p|p.local&&p.life_state=="alive");
-        let center=if cfg.center_local {local.map(|p|p.position)} else {None};
+        let focus=snap.radar_focus(cfg.follow_spectator);
+        // On spectator target changes, immediately adopt the new camera
+        // orientation instead of smoothing from the previous player's yaw.
+        let focus_id=focus.as_ref().map(|p|(p.spectating,p.entity_id));
+        CAMERA_FOCUS_ID.with(|cell|{
+            let mut last=cell.borrow_mut();
+            if *last!=focus_id {CAMERA_YAW.with(|yaw|*yaw.borrow_mut()=None);}
+            *last=focus_id;
+        });
+        let center=if cfg.center_local {focus.as_ref().map(|p|p.position)} else {None};
         // Source 2 yaw: 0 degrees east, 90 degrees north.
-        // Transform the map AND the markers so local view points upwards.
+        // Map and players are transformed around the current observed target.
         let camera_angle=if cfg.rotate_with_view {
-            local.and_then(|p|p.yaw).filter(|v|v.is_finite()).map(|yaw|smooth_yaw(yaw-90.0))
+            focus.as_ref().and_then(|p|p.yaw).filter(|v|v.is_finite()).map(|yaw|smooth_yaw(yaw-90.0))
         }else{None};
         if camera_angle.is_none(){CAMERA_YAW.with(|c|*c.borrow_mut()=None);}
         if let Some(angle)=camera_angle {
@@ -387,7 +399,13 @@ mod win {
         }
         if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
-        let text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
+        let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
+        if cfg.follow_spectator {
+            if let Some(target)=focus.as_ref().filter(|p|p.spectating){
+                let short:String=target.name.chars().take(18).collect();
+                text.push_str(&format!(" | OBS: {short}"));
+            }
+        }
         let _=dc;
         STATUS.with(|s|{*s.borrow_mut()=text;});
     }
@@ -489,7 +507,13 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
-    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&!s.visible);assert!((s.zoom-1.5).abs()<0.01);}
+    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&s.follow_spectator&&!s.visible);assert!((s.zoom-1.5).abs()<0.01);}
+    #[test]fn observer_setting_roundtrip(){
+        let mut s=OverlaySettings::default();assert!(s.follow_spectator);
+        assert!(s.update(&json!({"follow_spectator":false})).is_ok());
+        assert!(!s.follow_spectator);
+        assert!(s.update(&json!({"follow_spectator":"yes"})).is_err());
+    }
     #[test]fn validate(){let mut s=OverlaySettings::default();assert!(s.update(&json!({"zoom":2.0,"visible":true,"self_color":"#00ffbb"})).is_ok());assert!(s.visible);assert!((s.zoom-2.).abs()<0.01);assert!(s.update(&json!({"zoom":20})).is_err());assert!(s.update(&json!({"self_color":"red"})).is_err());}
     #[test]fn site_toggle(){let mut s=OverlaySettings::default();assert!(s.show_sites);assert!(s.update(&json!({"show_sites":false})).is_ok());assert!(!s.show_sites);assert!(s.update(&json!({"show_sites":"yes"})).is_err());}
     #[test]fn follow_centers_me(){let map=(-3230.,1713.,5.);let me=[-1500.,500.,5.];

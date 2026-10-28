@@ -50,11 +50,33 @@ pub struct GrenadeView {
     pub fire_cells:Vec<[f32;3]>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObserverView {
+    /// Entity-list index of the observed pawn; stable across snapshots.
+    pub target_entity_id: u32,
+    pub player_id: Option<u32>,
+    pub name: String,
+    pub position: [f32; 3],
+    pub yaw: Option<f32>,
+    pub mode: u8,
+}
+
+/// Camera focus used only for the small native map.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadarFocus {
+    pub entity_id: u32,
+    pub position: [f32; 3],
+    pub yaw: Option<f32>,
+    pub name: String,
+    pub spectating: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub status: String,
     pub pid: u32,
     pub local_team: u8,
     pub players: Vec<Player>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub observer_view: Option<ObserverView>,
     pub bomb_carrier_id: Option<u32>,
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub bomb_world: Option<BombWorld>,
@@ -79,9 +101,29 @@ pub fn now_secs() -> f64 {
 }
 
 impl Snapshot {
+    /// The living local player always takes precedence; when dead, optionally
+    /// follow the confirmed observer target (not the corpse position).
+    pub fn radar_focus(&self, follow_spectator: bool) -> Option<RadarFocus> {
+        if let Some(p)=self.players.iter().find(|p|p.local && p.life_state=="alive") {
+            return Some(RadarFocus{entity_id:p.id,position:p.position,
+                yaw:p.yaw,name:p.name.clone(),spectating:false});
+        }
+        if follow_spectator {
+            if let Some(target)=self.observer_view.as_ref(){
+                if matches!(target.mode,4|5)
+                    && target.position.iter().all(|v|v.is_finite())
+                    && target.position!=[0.,0.,0.] {
+                    return Some(RadarFocus{entity_id:target.target_entity_id,
+                        position:target.position,yaw:target.yaw,
+                        name:target.name.clone(),spectating:true});
+                }
+            }
+        }
+        None
+    }
     pub fn status(status: &str, message: &str) -> Self {
         Self {
-            status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(),
+            status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(), observer_view:None,
             bomb_carrier_id: None, bomb_world: None, grenades:Vec::new(), bomb_carrier_source: None, c4_unowned: false,
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
@@ -175,6 +217,36 @@ mod tests {
     #[test] fn yaw(){assert_eq!(normalized_yaw(Some([0.,450.,0.])),Some(90.));assert!(normalized_yaw(Some([0.,f32::NAN,0.])).is_none());}
     #[test] fn map(){assert_eq!(normalize_map_name("maps/de_mirage.vpk").unwrap(),"de_mirage");assert!(normalize_map_name("../../bad.cfg").is_none());}
     #[test] fn demo(){let d=demo_snapshot(2.);assert_eq!(d.players.len(),7);assert_eq!(d.bomb_carrier_id,Some(2));}
+    #[test] fn spectator_focus_follows_target(){
+        let mut s=demo_snapshot(1.);
+        let watched=s.players.iter().find(|p|p.id==2).unwrap().clone();
+        s.players.iter_mut().find(|p|p.local).unwrap().life_state="dead".into();
+        s.observer_view=Some(ObserverView{target_entity_id:222,player_id:Some(2),
+            name:watched.name.clone(),position:watched.position,yaw:watched.yaw,mode:4});
+        let focus=s.radar_focus(true).unwrap();
+        assert!(focus.spectating);assert_eq!(focus.entity_id,222);
+        assert_eq!(focus.position,watched.position);assert_eq!(focus.yaw,watched.yaw);
+        assert!(s.radar_focus(false).is_none());
+    }
+    #[test] fn spectator_target_switch_and_freecam(){
+        let mut s=demo_snapshot(1.);
+        s.players.iter_mut().find(|p|p.local).unwrap().life_state="dead".into();
+        s.observer_view=Some(ObserverView{target_entity_id:101,player_id:Some(1),
+            name:"A".into(),position:[120.,30.,10.],yaw:Some(45.),mode:4});
+        assert_eq!(s.radar_focus(true).unwrap().entity_id,101);
+        s.observer_view.as_mut().unwrap().target_entity_id=102;
+        s.observer_view.as_mut().unwrap().position=[140.,40.,10.];
+        assert_eq!(s.radar_focus(true).unwrap().position,[140.,40.,10.]);
+        s.observer_view.as_mut().unwrap().mode=6;
+        assert!(s.radar_focus(true).is_none());
+    }
+    #[test] fn living_local_player_takes_priority(){
+        let mut s=demo_snapshot(1.);
+        s.observer_view=Some(ObserverView{target_entity_id:333,player_id:None,
+            name:"Other".into(),position:[50.,50.,50.],yaw:Some(90.),mode:4});
+        let f=s.radar_focus(true).unwrap();
+        assert!(!f.spectating);assert_eq!(f.name,"demo-user");
+    }
     #[test] fn json_browser_contract(){
         let v=serde_json::to_value(demo_snapshot(1.)).unwrap();
         assert_eq!(v["status"],"demo");assert!(v["players"][1]["position"].is_array());

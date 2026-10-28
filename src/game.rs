@@ -1,5 +1,5 @@
 //! Source 2 read-only, best-effort controller/pawn reader.
-use crate::model::{BombWorld, Diagnostics, GrenadeView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
+use crate::model::{BombWorld, Diagnostics, GrenadeView, ObserverView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
 use serde_json::{json, Value};
@@ -292,6 +292,64 @@ impl CS2Reader {
         diag.set("grenades_found",json!(out.len()));
         out
     }
+
+    /// ObserverService lives on the local observer pawn, not on the watched
+    /// pawn/controller. 4=in-eye, 5=chase. Other modes must not pin the map.
+    fn read_observer_view<M:Memory>(&mut self,p:&mut M,list:u64,local:u64,
+        local_pawn:u64,pawns:&BTreeMap<u64,Player>)->Option<ObserverView>{
+        if local==0{return None;}
+        let alive=self.schema.field("CCSPlayerController","m_bPawnIsAlive")
+            .and_then(|off|try_u8(p,local+off));
+        if alive==Some(1){return None;}
+        let handle=self.schema.field("CCSPlayerController","m_hObserverPawn")
+            .map(|off|p.u32(local+off)).filter(|h|*h!=0 && *h!=u32::MAX && (h&0x7fff)!=0);
+        let observer=handle.map(|h|self.entity(p,list,h&0x7fff)).filter(|v|*v!=0);
+        let service_off=self.schema.field("C_BasePlayerPawn","m_pObserverServices")?;
+        let mode_off=self.schema.field("CPlayer_ObserverServices","m_iObserverMode")?;
+        let target_off=self.schema.field("CPlayer_ObserverServices","m_hObserverTarget")?;
+        let scene_off=self.schema.field("C_BaseEntity","m_pGameSceneNode")?;
+        let pos_off=self.schema.field("CGameSceneNode","m_vecAbsOrigin")?;
+        let health_off=self.schema.field("C_BaseEntity","m_iHealth");
+        let team_off=self.schema.field("C_BaseEntity","m_iTeamNum");
+        let yaw_off=self.schema.field("C_CSPlayerPawn","m_angEyeAngles");
+        // CS2 can put services on an observer pawn or retain them on the
+        // previous local player pawn during spectator transitions.
+        for entity in [observer,Some(local_pawn).filter(|v|*v!=0)].into_iter().flatten(){
+            let services=p.u64(entity+service_off);
+            if services==0{continue;}
+            let mode=match try_u8(p,services+mode_off){Some(4|5)=>p.u8(services+mode_off),_=>continue};
+            let handle=p.u32(services+target_off);
+            if handle==0 || handle==u32::MAX || handle&0x7fff==0 {continue;}
+            let index=handle&0x7fff;
+            let pawn=self.entity(p,list,index);
+            if pawn==0 || pawn==entity || pawn==local_pawn {continue;}
+            // Prefer the controller-derived player state already validated
+            // by the radar reader, fall back to validated entity properties.
+            if let Some(player)=pawns.get(&pawn) {
+                if player.life_state=="alive"{
+                    return Some(ObserverView{target_entity_id:index,
+                        player_id:Some(player.id),name:player.name.clone(),
+                        position:player.position,yaw:player.yaw,mode});
+                }
+                continue;
+            }
+            let hp=health_off.and_then(|off|try_i32(p,pawn+off));
+            if !hp.is_some_and(|v|(1..=200).contains(&v)){continue;}
+            let team=team_off.and_then(|off|try_u8(p,pawn+off));
+            if !matches!(team,Some(2|3)){continue;}
+            let node=p.u64(pawn+scene_off);
+            if node==0{continue;}
+            let position=match p.vec3(node+pos_off){
+                Some(v) if v!=[0.,0.,0.] && v.iter().all(|x|x.is_finite())=>v,
+                _=>continue
+            };
+            let yaw=yaw_off.and_then(|off|p.vec3(pawn+off))
+                .and_then(|angles|normalized_yaw(Some(angles)));
+            return Some(ObserverView{target_entity_id:index,player_id:None,
+                name:format!("Игрок #{index}"),position,yaw,mode});
+        }
+        None
+    }
     pub fn current_map<M:Memory>(&self,p:&mut M,base:u64)->Option<String>{
         let off=self.schema.offset("dwGlobalVars")?;let ptr=p.u64(base+off);if ptr==0{return None;}
         let strptr=p.u64(ptr+0x180);if strptr==0{return None;}
@@ -427,6 +485,9 @@ impl CS2Reader {
                 }
             }
         }
+        let observer_view=self.read_observer_view(p,list,local,local_pawn,&pawns);
+        diag.set("observer_target_found",json!(observer_view.is_some()));
+        diag.set("observer_mode",json!(observer_view.as_ref().map(|v|v.mode)));
         let grenades=if details{self.scan_grenades(p,list,&mut diag)}else{vec![]};
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
@@ -462,7 +523,7 @@ impl CS2Reader {
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,
             bomb_carrier_id:if bomb_world.is_some(){None}else{global_owner.or_else(||unique_bomb_carrier(&players))},
-            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,details_read:details,
+            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,observer_view,details_read:details,
             local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
 }

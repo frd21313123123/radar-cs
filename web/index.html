@@ -132,6 +132,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Открыть отдельное окно <input type="checkbox" id="nativeVisible"></label>
     <label class="settings-row">Поверх всех окон <input type="checkbox" id="nativeTop" checked></label>
     <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
+    <label class="settings-row">Следовать за игроком в спектаторе <input type="checkbox" id="nativeFollowSpec" checked></label>
     <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
     <label class="settings-row">Круг шума на миникарте <input type="checkbox" id="nativeNoise" checked></label>
     <label class="settings-row">Подписи плэнтов A / B на миникарте <input type="checkbox" id="nativeSites" checked></label>
@@ -442,7 +443,7 @@ async function updateNativeSettings(){try {
  if(!res.ok)throw Error('HTTP '+res.status);
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']]) $(id).checked=Boolean(d.settings?.[field]);
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']]) $(id).checked=Boolean(d.settings?.[field]);
  $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
@@ -461,7 +462,7 @@ function nativeChange(fields){
    $('miniBtn').classList.toggle('active',d.settings.visible);
  }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']])
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
 $('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
