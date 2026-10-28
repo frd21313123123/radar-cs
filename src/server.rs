@@ -90,8 +90,16 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
     if query_arg(query,"token")!=Some(server.token.as_str()){return reply_json(&mut stream,403,json!({"error":"invalid access token"}));}
     match path {
         "/"=>{
-            let bytes=std::fs::read(&server.html).unwrap_or_else(|_|include_str!("../web/index.html").as_bytes().to_vec());
-            respond(&mut stream,200,&bytes,"text/html; charset=utf-8")
+            // The EXE and its browser UI must always be the *same* release.
+            // An old unpacked web/index.html can silently break maps and
+            // new API features when the user replaces only the EXE.
+            let embedded=include_bytes!("../web/index.html");
+            if std::env::var_os("CAS_RADAR_DEV_WEB").as_deref()==Some(std::ffi::OsStr::new("1")){
+                let bytes=std::fs::read(&server.html).unwrap_or_else(|_|embedded.to_vec());
+                respond(&mut stream,200,&bytes,"text/html; charset=utf-8")
+            }else{
+                respond(&mut stream,200,embedded,"text/html; charset=utf-8")
+            }
         }
         "/api/state"=>{
             let snap=server.state.lock().map(|s|s.snapshot()).map_err(|_|std::io::Error::other("poisoned state"))?;
@@ -117,6 +125,12 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn bundled_web_matches_timer_and_map(){
+        let html=include_str!("../web/index.html");
+        assert!(html.contains("function renderBackground()"));
+        assert!(html.contains("id=\\"bombTimerPanel\\""));
+        assert!(!html.contains("bombTimerHp"));
+    }
     #[test]fn bomb_png_embedded(){assert!(include_bytes!("../assets/bomb_ground.png").starts_with(b"\x89PNG\r\n\x1a\n"));}
     #[test]fn auth_query(){assert_eq!(query_arg("map=de_nuke&token=hello","token"),Some("hello"));assert_eq!(query_arg("token=bad","token"),Some("bad"));}
 }
