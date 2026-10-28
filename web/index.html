@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v1.3 — External Telemetry</title>
+<title>CAS Radar Rust v1.4 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -110,7 +110,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.3</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.4</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
@@ -267,6 +267,18 @@ function draw(now){requestAnimationFrame(draw);
      ctx.restore();
    }
  }
+ const dropped=snapshot.bomb_world;
+ if(dropped&&Array.isArray(dropped.position)&&dropped.position.length===3
+    &&dropped.position.every(Number.isFinite)&&inLayer(dropped.position)){
+    const point=xy(dropped.position);
+    ctx.save();ctx.fillStyle=dropped.status==='planted'?'#fa514e':'#ffc04b';
+    ctx.strokeStyle='#241913';ctx.lineWidth=3;
+    ctx.beginPath();ctx.arc(point.x,point.y,10,0,Math.PI*2);ctx.stroke();ctx.fill();
+    ctx.font='900 12px Segoe UI,Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+    const label=dropped.status==='planted'?'C4!':'C4';
+    ctx.strokeText(label,point.x,point.y-20);ctx.fillText(label,point.x,point.y-20);
+    ctx.restore();
+ }
  for(const p of people){let xy0=xy(p.position);if(xy0.x<left-30||xy0.x>left+size+30||xy0.y<top-30||xy0.y>top+size+30)continue;
     const color=playerColor(p),life=knownLife(p),chosen=selected===p.id,highlight=hovered===p.id;
     ctx.save();ctx.translate(xy0.x,xy0.y);
@@ -316,7 +328,7 @@ function playerCard(p){
  <div class="card-inventory">${equip?safeText(equip):'Дополнительные предметы не обнаружены'}</div></div>`;
 }
 function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
- const listKey=JSON.stringify([selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_carrier_source,
+ const listKey=JSON.stringify([selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_world,snapshot.bomb_carrier_source,
    list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory])]);
  if(listKey===lastListKey)return;lastListKey=listKey;
  $('playerCount').textContent=String(all.filter(playerVisible).length).padStart(2,'0');
@@ -326,7 +338,10 @@ function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
  $('tStatus').textContent=localTeam()===2?'ВАША КОМАНДА':'TERRORISTS';
  $('ctStatus').textContent=localTeam()===3?'ВАША КОМАНДА':'COUNTER-TERRORISTS';
  const carrier=all.find(isCarrier);
- $('bombStatus').textContent=carrier?'▣ '+(carrier.c4_source==='recent'?'C4?':'C4')+' · '+(carrier.name||'Player'):'C4 · носитель не подтверждён';
+ $('bombStatus').textContent=snapshot.bomb_world?
+    (snapshot.bomb_world.status==='planted'?'▣ C4 · УСТАНОВЛЕНА':'▣ C4 · НА ЗЕМЛЕ'):
+    carrier?'▣ '+(carrier.c4_source==='recent'?'C4?':'C4')+' · '+(carrier.name||'Player'):
+    'C4 · носитель не подтверждён';
  for(const [team,id] of [[2,'tPlayers'],[3,'ctPlayers']]){
    let parent=$(id),scroll=parent.scrollTop;
    parent.innerHTML=list.filter(p=>p.team===team).sort((a,b)=>Number(b.local)-Number(a.local))

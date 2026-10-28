@@ -312,6 +312,16 @@ mod win {
                 }
             }
         }
+        // Draw world C4 regardless of team filters; keep it in map space,
+        // so it follows the same rotation and pan as players and plant sites.
+        if let Some(bomb)=snap.bomb_world.as_ref(){
+            if let Some((x,y))=screen_point(bomb.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
+                let px=x.round() as i32;let py=y.round() as i32;
+                fill_circle(g,px,py,11,0xff1d1610);
+                fill_circle(g,px,py,8,if bomb.status=="planted"{0xfffa514e}else{0xffffbc43});
+                fill_circle(g,px,py,3,0xff241c13);
+            }
+        }
         for p in &snap.players {
             if p.life_state!="alive" {continue;}
             let (x,y)=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center) {Some(v)=>v,None=>continue};

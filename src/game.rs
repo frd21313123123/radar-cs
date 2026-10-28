@@ -1,5 +1,5 @@
 //! Source 2 read-only, best-effort controller/pawn reader.
-use crate::model::{Diagnostics, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
+use crate::model::{BombWorld, Diagnostics, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
 use serde_json::{json, Value};
@@ -112,17 +112,91 @@ impl CS2Reader {
         if active_id>0&&!inventory.contains(&active_name){inventory.push(active_name.clone());}
         (active_name,inventory,if has_c4{Some(true)}else if complete{Some(false)}else{None})
     }
-    fn global_c4_owner<M:Memory>(&mut self,p:&mut M,list:u64,base:u64)->(Option<u64>,bool){
-        let off=match self.schema.offset("dwWeaponC4"){Some(o)=>o,None=>return(None,false)};
-        let raw=match p.read(base+off,8){Some(r)=>r,None=>return(None,false)};
-        let ptr=u64::from_le_bytes(raw.try_into().unwrap());
-        if ptr==0 || !self.item(p,ptr).is_some_and(|(id,_)|id==49){return(None,false);}
-        let owner_off=match self.schema.field("C_BaseEntity","m_hOwnerEntity"){Some(o)=>o,None=>return(None,false)};
-        let raw=match p.read(ptr+owner_off,4){Some(r)=>r,None=>return(None,false)};
-        let owner=u32::from_le_bytes(raw.try_into().unwrap());
-        if owner==0||owner==u32::MAX{return(None,true);}
-        let pawn=self.entity(p,list,owner&0x7fff);
-        (if pawn==0{None}else{Some(pawn)},false)
+
+    /// Locate C4 by the global pointer AND the entity list: the global
+    /// pointer alone may represent only the local player's equipped C4.
+    /// A world marker requires a real ownerless C4 entity and valid position.
+    fn scan_c4<M:Memory>(&mut self,p:&mut M,list:u64,base:u64,pawns:&BTreeMap<u64,Player>)
+        ->(Option<u32>,Option<BombWorld>,bool,u32) {
+        let mut candidates=Vec::new();
+        let mut seen=HashSet::new();
+        if let Some(offset)=self.schema.offset("dwWeaponC4") {
+            let ptr=p.u64(base+offset);
+            if ptr!=0 && seen.insert(ptr){candidates.push(ptr);}
+        }
+        let highest=self.schema.offset("dwGameEntitySystem_highestEntityIndex")
+            .map(|offset|p.i32(list+offset))
+            .filter(|idx|(64..=8191).contains(idx))
+            .unwrap_or(2048).min(4095) as u32;
+        let stride=self.layout.stride;
+        for chunk in 0..=((highest as usize)>>9) {
+            let block=self.block(p,list,(chunk*512) as u32);
+            if block==0 {continue;}
+            for begin in (0..512).step_by(128) {
+                let first=chunk*512+begin;
+                if first>highest as usize{break;}
+                let count=(highest as usize+1-first).min(128);
+                if let Some(raw)=p.read(block+begin as u64*stride as u64,count*stride) {
+                    for i in 0..count {
+                        let offset=i*stride;
+                        let ptr=u64::from_le_bytes(raw[offset..offset+8].try_into().unwrap());
+                        if ptr!=0 && ptr>=0x10000 && seen.insert(ptr){candidates.push(ptr);}
+                    }
+                }
+            }
+        }
+        let scene=self.schema.field("C_BaseEntity","m_pGameSceneNode");
+        let origin=self.schema.field("CGameSceneNode","m_vecAbsOrigin");
+        let owner_off=self.schema.field("C_BaseEntity","m_hOwnerEntity");
+        let mut carried:Option<u32>=None;
+        let mut dropped:Option<BombWorld>=None;
+        let mut ownerless=false;
+        let mut checked=0;
+        for ptr in candidates {
+            if !self.item(p,ptr).is_some_and(|(id,_)|id==49){continue;}
+            checked+=1;
+            let raw_owner=owner_off.and_then(|o|p.read(ptr+o,4));
+            let owner=match raw_owner {
+                Some(raw)=>u32::from_le_bytes(raw.try_into().unwrap()),
+                None=>continue, // Unknown owner is not the same as dropped C4.
+            };
+            if owner!=0 && owner!=u32::MAX && (owner & 0x7fff)!=0 {
+                let pawn=self.entity(p,list,owner & 0x7fff);
+                if let Some(player)=pawns.get(&pawn) {
+                    if player.team==2 && player.life_state=="alive"{carried=Some(player.id);}
+                }
+                continue;
+            }
+            ownerless=true;
+            if dropped.is_some(){continue;}
+            let xyz=scene.and_then(|o|{let node=p.u64(ptr+o);
+                if node!=0 {origin.and_then(|vo|p.vec3(node+vo))}else{None}})
+                .filter(|v|*v!=[0.,0.,0.]);
+            let last=self.schema.field("C_C4","m_vecLastValidDroppedPosition")
+                .and_then(|o|p.vec3(ptr+o)).filter(|v|*v!=[0.,0.,0.]);
+            if let Some(pos)=xyz.or(last) {
+                dropped=Some(BombWorld{position:pos,status:"dropped".into(),source:"entity".into()});
+            }
+        }
+        // A planted bomb is a separate entity; it must not be shown as "dropped".
+        if let Some(offset)=self.schema.offset("dwPlantedC4"){
+            let ptr=p.u64(base+offset);
+            let active=self.schema.field("C_PlantedC4","m_bBombTicking")
+                .and_then(|o|p.read(ptr+o,1))
+                .and_then(|raw|raw.first().copied())
+                .is_some_and(|b|b==1);
+            if ptr!=0 && active {
+                let pos=scene.and_then(|o|{let node=p.u64(ptr+o);
+                    if node!=0 {origin.and_then(|vo|p.vec3(node+vo))}else{None}})
+                    .filter(|v|*v!=[0.,0.,0.]);
+                if let Some(position)=pos {
+                    return (None,Some(BombWorld{position,status:"planted".into(),source:"planted_entity".into()}),true,checked);
+                }
+                return (None,None,true,checked);
+            }
+        }
+        if carried.is_some(){(carried,None,false,checked)}
+        else {(None,dropped,ownerless,checked)}
     }
     pub fn current_map<M:Memory>(&self,p:&mut M,base:u64)->Option<String>{
         let off=self.schema.offset("dwGlobalVars")?;let ptr=p.u64(base+off);if ptr==0{return None;}
@@ -247,13 +321,17 @@ impl CS2Reader {
                 if rank(&entry)>rank(prev){pawns.insert(pawn,entry);}
             }else{pawns.insert(pawn,entry);}
         }
-        let mut global_owner=None;let mut unowned=false;
+        let mut global_owner=None;let mut unowned=false;let mut bomb_world=None;
         if details {
-            let (owner,not_owned)=self.global_c4_owner(p,list,base);
-            unowned=not_owned;
-            if let Some(owner)=owner {if let Some(player)=pawns.get_mut(&owner){
-                if player.team==2&&player.life_state=="alive"{global_owner=Some(player.id);player.has_c4=Some(true);player.c4_source=Some("global".into());}
-            }}
+            let (owner,world,ownerless,scanned)=self.scan_c4(p,list,base,&pawns);
+            global_owner=owner;bomb_world=world;unowned=ownerless;
+            diag.set("c4_entities_scanned",json!(scanned));
+            diag.set("c4_world_found",json!(bomb_world.is_some()));
+            if let Some(id)=owner {
+                if let Some(player)=pawns.values_mut().find(|player|player.id==id) {
+                    player.has_c4=Some(true);player.c4_source=Some("entity_owner".into());
+                }
+            }
         }
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
@@ -287,8 +365,9 @@ impl CS2Reader {
             else if !self.layout.confirmed && local!=0{"Локальный контроллер не найден в слотах списка сущностей."}
             else{"Координаты pawn не читаются: проверьте schema/игровой процесс."};Some(reason.to_owned())
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
-        Ok(Snapshot{status:status.into(),pid,local_team,bomb_carrier_id:global_owner.or_else(||unique_bomb_carrier(&players)),
-            c4_global_owner_id:global_owner,c4_unowned:unowned,players,details_read:details,
+        Ok(Snapshot{status:status.into(),pid,local_team,
+            bomb_carrier_id:if bomb_world.is_some(){None}else{global_owner.or_else(||unique_bomb_carrier(&players))},
+            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,details_read:details,
             local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
 }
