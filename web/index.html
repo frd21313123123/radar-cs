@@ -123,6 +123,9 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   <label class="settings-row">Показывать направление взгляда <input type="checkbox" id="showDirection" checked></label>
   <label class="settings-row">Круг шума на веб-карте <input type="checkbox" id="showNoise" checked></label>
   <label class="settings-row">Подписи плэнтов A / B на веб-карте <input type="checkbox" id="showSites" checked></label>
+  <label class="settings-row">Зоны смоков <input type="checkbox" id="showSmokes" checked></label>
+  <label class="settings-row">Зоны молотовых <input type="checkbox" id="showFire" checked></label>
+  <label class="settings-row">Пунктирный путь гранат <input type="checkbox" id="showPaths" checked></label>
   <div class="native-overlay-panel" id="nativeOverlayPanel">
     <div class="native-overlay-head"><b>▣ Мини-радар Windows</b><span id="overlayStatus">Проверка…</span></div>
     <p>Это отдельное окно Rust/Win32, не браузер. Перемещай за системный заголовок, растягивай за рамку.</p>
@@ -132,6 +135,9 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
     <label class="settings-row">Круг шума на миникарте <input type="checkbox" id="nativeNoise" checked></label>
     <label class="settings-row">Подписи плэнтов A / B на миникарте <input type="checkbox" id="nativeSites" checked></label>
+    <label class="settings-row">Смоки в миникарте <input type="checkbox" id="nativeSmokes" checked></label>
+    <label class="settings-row">Молотовы в миникарте <input type="checkbox" id="nativeFire" checked></label>
+    <label class="settings-row">Пунктир гранат в миникарте <input type="checkbox" id="nativePaths" checked></label>
     <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.5×</span> <input type="range" id="nativeZoom" min="0.7" max="4" step="0.1" value="1.5"></label>
     <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
     <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
@@ -150,16 +156,16 @@ let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='';
-const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true};
+const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true};
 let prefs={...DEFAULT_PREFS};
 const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
 function loadPrefs(){try{const saved=JSON.parse(localStorage.getItem('cas-radar-v06-settings')||'{}');
   for(const name of ['friend','enemy','own'])if(validHex(saved[name]))prefs[name]=saved[name];
-  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
+  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites','showSmokes','showFire','showPaths'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
 }catch(_){ }applyPrefs();}
 function applyPrefs(){for(const name of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+name,prefs[name]);
   for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']])$(id).value=prefs[key];
-  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites']])$(id).checked=prefs[key];
+  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths']])$(id).checked=prefs[key];
   lastListKey='';}
 function localTeam(){let t=Number(snapshot.local_team);if(t===2||t===3)return t;
   const me=(snapshot.players||[]).find(p=>p.local);return me?.team||0;}
@@ -265,6 +271,40 @@ function draw(now){requestAnimationFrame(draw);
      ctx.font='800 14px Segoe UI,Arial';ctx.fillStyle='#fff0c8';
      ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(name,x,y+.5);
      ctx.restore();
+   }
+ }
+ for(const g of (snapshot.grenades||[])){
+   if(!((g.kind==='smoke'&&prefs.showSmokes)||(g.kind==='molotov'&&prefs.showFire)))continue;
+   const pos=g.position;
+   if(!Array.isArray(pos)||pos.length!==3||!pos.every(Number.isFinite))continue;
+   const fire=g.kind==='molotov',color=fire?'rgba(255,157,96,.93)':'rgba(154,226,241,.94)';
+   if(prefs.showPaths&&Array.isArray(g.trajectory)&&g.trajectory.length>1){
+     const points=g.trajectory.filter(p=>Array.isArray(p)&&p.length===3&&p.every(Number.isFinite)).map(xy);
+     if(points.length>1){ctx.save();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash([6,5]);
+       ctx.beginPath();ctx.moveTo(points[0].x,points[0].y);
+       for(let i=1;i<points.length;i++)ctx.lineTo(points[i].x,points[i].y);
+       ctx.stroke();ctx.restore();}
+   }
+   const p=xy(pos);
+   if(g.state==='active'){
+     const k=Number(mapData().radar_info?.scale),units=Number(g.radius_units);
+     if(Number.isFinite(k)&&k>0&&Number.isFinite(units)&&units>0){
+       const radius=units/k/1024*size;
+       ctx.save();ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);
+       ctx.fillStyle=fire?'rgba(255,111,50,.15)':'rgba(160,225,239,.18)';
+       ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.fill();ctx.stroke();ctx.restore();
+       if(fire&&Array.isArray(g.fire_cells)){
+         for(const cell of g.fire_cells){
+           if(!Array.isArray(cell)||cell.length!==3||!cell.every(Number.isFinite))continue;
+           const f=xy(cell),r=Math.max(38/k/1024*size,2);
+           ctx.save();ctx.fillStyle='rgba(255,91,43,.28)';ctx.beginPath();
+           ctx.arc(f.x,f.y,r,0,Math.PI*2);ctx.fill();ctx.restore();
+         }
+       }
+     }
+   }else{
+     ctx.save();ctx.fillStyle=color;ctx.strokeStyle='#111a21';ctx.lineWidth=2;ctx.beginPath();
+     ctx.arc(p.x,p.y,6,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
    }
  }
  const dropped=snapshot.bomb_world;
@@ -402,7 +442,7 @@ async function updateNativeSettings(){try {
  if(!res.ok)throw Error('HTTP '+res.status);
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites']]) $(id).checked=Boolean(d.settings?.[field]);
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']]) $(id).checked=Boolean(d.settings?.[field]);
  $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
@@ -421,7 +461,7 @@ function nativeChange(fields){
    $('miniBtn').classList.toggle('active',d.settings.visible);
  }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites']])
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
 $('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
@@ -438,7 +478,7 @@ for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','o
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
     if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});}});
 }
-for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites']]){
+for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths']]){
   $(id).addEventListener('change',e=>{prefs[key]=e.target.checked;applyPrefs();
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
 }

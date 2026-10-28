@@ -31,6 +31,9 @@ pub struct OverlaySettings {
     pub rotate_with_view: bool,
     pub show_noise: bool,
     pub show_sites: bool,
+    pub show_smokes: bool,
+    pub show_fire: bool,
+    pub show_paths: bool,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -38,20 +41,23 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,show_sites:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","show_sites","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
         if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
         if let Some(x)=o.get("show_noise"){self.show_noise=x.as_bool().ok_or("show_noise must be boolean")?;}
         if let Some(x)=o.get("show_sites"){self.show_sites=x.as_bool().ok_or("show_sites must be boolean")?;}
+        if let Some(x)=o.get("show_smokes"){self.show_smokes=x.as_bool().ok_or("show_smokes must be boolean")?;}
+        if let Some(x)=o.get("show_fire"){self.show_fire=x.as_bool().ok_or("show_fire must be boolean")?;}
+        if let Some(x)=o.get("show_paths"){self.show_paths=x.as_bool().ok_or("show_paths must be boolean")?;}
         if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
@@ -167,6 +173,8 @@ mod win {
         fn GdipDrawEllipseI(g:*mut c_void,pen:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
         fn GdipDeletePen(pen:*mut c_void)->i32;
         fn GdipDrawLineI(g:*mut c_void,pen:*mut c_void,x1:i32,y1:i32,x2:i32,y2:i32)->i32;
+        fn GdipSetPenDashStyle(pen:*mut c_void,style:i32)->i32;
+        fn GdipDrawLinesI(g:*mut c_void,pen:*mut c_void,points:*const Point,count:i32)->i32;
         fn GdipTranslateWorldTransform(graphics:*mut c_void,dx:f32,dy:f32,order:i32)->i32;
         fn GdipRotateWorldTransform(graphics:*mut c_void,angle:f32,order:i32)->i32;
         fn GdipResetWorldTransform(graphics:*mut c_void)->i32;
@@ -320,6 +328,52 @@ mod win {
                 fill_circle(g,px,py,11,0xff1d1610);
                 fill_circle(g,px,py,8,if bomb.status=="planted"{0xfffa514e}else{0xffffbc43});
                 fill_circle(g,px,py,3,0xff241c13);
+            }
+        }
+        // Utility overlays are drawn in map coordinates: camera rotation is
+        // already active here, so paths and radii follow the map correctly.
+        for nade in &snap.grenades{
+            if !((nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire)){continue;}
+            if cfg.show_paths && nade.trajectory.len()>1{
+                let points:Vec<Point>=nade.trajectory.iter().filter_map(|v|
+                    screen_point(*v,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
+                    .map(|(x,y)|Point{x:x.round() as i32,y:y.round() as i32})).collect();
+                if points.len()>1{unsafe{
+                    let mut pen=null_mut();
+                    if GdipCreatePen1(if nade.kind=="smoke"{0xff9ee6ed}else{0xffffa268},2.0,2,&mut pen)==0&&!pen.is_null(){
+                        GdipSetPenDashStyle(pen,2);GdipDrawLinesI(g,pen,points.as_ptr(),points.len() as i32);GdipDeletePen(pen);
+                    }
+                }}
+            }
+            let at=screen_point(nade.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center);
+            if let Some((x,y))=at{
+                if nade.state=="active"{
+                    let r=(nade.radius_units/(scale*1024.0)*side).clamp(1.0,2000.0);
+                    let fire=nade.kind=="molotov";
+                    let color=if fire{0x34ff763c}else{0x307bbbd2};
+                    let outline=if fire{0xfffa9253}else{0xffa3e6f3};
+                    unsafe{
+                        let b=brush(g,color);
+                        if !b.is_null(){GdipFillEllipseI(g,b,(x-r) as i32,(y-r) as i32,(2.*r) as i32,(2.*r) as i32);GdipDeleteBrush(b);}
+                        let mut pen=null_mut();
+                        if GdipCreatePen1(outline,1.8,2,&mut pen)==0&&!pen.is_null(){
+                            GdipDrawEllipseI(g,pen,(x-r) as i32,(y-r) as i32,(r*2.) as i32,(r*2.) as i32);
+                            GdipDeletePen(pen);
+                        }
+                    }
+                    if fire{
+                        for cell in &nade.fire_cells {
+                            if let Some((fx,fy))=screen_point(*cell,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
+                                let cr=(38.0/(scale*1024.0)*side).max(2.0);
+                                unsafe{let b=brush(g,0x5fff6a36);
+                                    if !b.is_null(){GdipFillEllipseI(g,b,(fx-cr) as i32,(fy-cr) as i32,(2.*cr) as i32,(2.*cr) as i32);GdipDeleteBrush(b);}
+                                }
+                            }
+                        }
+                    }
+                }else{
+                    fill_circle(g,x.round() as i32,y.round() as i32,5,if nade.kind=="smoke"{0xff9ee6ed}else{0xffffa268});
+                }
             }
         }
         for p in &snap.players {
