@@ -29,6 +29,7 @@ pub struct OverlaySettings {
     pub topmost: bool,
     pub center_local: bool,
     pub rotate_with_view: bool,
+    pub show_noise: bool,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -36,18 +37,19 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
         if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
+        if let Some(x)=o.get("show_noise"){self.show_noise=x.as_bool().ok_or("show_noise must be boolean")?;}
         if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
@@ -159,6 +161,9 @@ mod win {
         fn GdipFillEllipseI(g:*mut c_void,brush:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
         fn GdipFillPolygonI(g:*mut c_void,brush:*mut c_void,points:*const Point,count:i32,mode:i32)->i32;
         fn GdipDeleteBrush(brush:*mut c_void)->i32;
+        fn GdipCreatePen1(color:u32,width:f32,unit:i32,pen:*mut *mut c_void)->i32;
+        fn GdipDrawEllipseI(g:*mut c_void,pen:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
+        fn GdipDeletePen(pen:*mut c_void)->i32;
         fn GdipTranslateWorldTransform(graphics:*mut c_void,dx:f32,dy:f32,order:i32)->i32;
         fn GdipRotateWorldTransform(graphics:*mut c_void,angle:f32,order:i32)->i32;
         fn GdipResetWorldTransform(graphics:*mut c_void)->i32;
@@ -254,6 +259,23 @@ mod win {
         CACHE.with(|image|{let map=image.borrow();if !map.image.is_null()&&map.name==game_map {
             unsafe{GdipDrawImageRectI(g,map.image,left as i32,top as i32,side as i32,side as i32);}
         }});
+        if cfg.show_noise {
+            if let (Some(me),Some(noise))=(local,snap.noise.as_ref()){
+                if let Some((x,y))=screen_point(me.position,(pos_x,pos_y,scale),
+                    width as f32,height as f32,cfg.zoom,center){
+                    let r=(noise.radius_units/(scale*1024.0)*side).clamp(1.0,8000.0);
+                    if r.is_finite()&&r>1.0 {unsafe{
+                        let fill=brush(g,0x1bffbf69);
+                        if !fill.is_null(){GdipFillEllipseI(g,fill,(x-r) as i32,(y-r) as i32,(r*2.0) as i32,(r*2.0) as i32);GdipDeleteBrush(fill);}
+                        let mut pen=null_mut();
+                        if GdipCreatePen1(0xdfffc776,2.0,2,&mut pen)==0&&!pen.is_null(){
+                            GdipDrawEllipseI(g,pen,(x-r) as i32,(y-r) as i32,(r*2.0) as i32,(r*2.0) as i32);
+                            GdipDeletePen(pen);
+                        }
+                    }}
+                }
+            }
+        }
         for p in &snap.players {
             if p.life_state!="alive" {continue;}
             let (x,y)=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center) {Some(v)=>v,None=>continue};

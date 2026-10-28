@@ -1,4 +1,4 @@
-use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,overlay::OverlayController};
+use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,noise::NoiseTracker,overlay::OverlayController};
 use serde_json::{json,Value};
 use std::{collections::HashMap,env,fs,path::{Path,PathBuf},sync::{Arc,Mutex},thread,time::{Duration,Instant}};
 use rand::{rngs::OsRng,RngCore};
@@ -30,6 +30,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     let begin=Instant::now();let mut proc=WinProcess::new();
     let mut reader=schema.map(CS2Reader::new);
     let mut tracker=BombTracker::default();
+    let mut noise_tracker=NoiseTracker::default();
     let mut last_scan=Instant::now()-Duration::from_secs(10);
     let mut last_map=Instant::now()-Duration::from_secs(10);
     let mut last_detail=Instant::now()-Duration::from_secs(10);
@@ -40,7 +41,8 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     loop {
         let tick=Instant::now();
         if demo {
-            if let Ok(mut st)=state.lock(){st.set_map("de_mirage","demo");st.snap=demo_snapshot(begin.elapsed().as_secs_f64());}
+            let mut s=demo_snapshot(begin.elapsed().as_secs_f64());noise_tracker.update(&mut s,Instant::now(),"de_mirage");
+            if let Ok(mut st)=state.lock(){st.set_map("de_mirage","demo");st.snap=s;}
         }else {
             let result:Result<Snapshot,String>=(||{
                 let reader=reader.as_mut().ok_or("No valid offsets; start once online or provide cache JSON")?;
@@ -66,13 +68,15 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 }
                 let map=state.lock().map(|s|s.current_map().to_owned()).unwrap_or_default();
                 tracker.update(&mut snap,Instant::now(),&map);
+                if let Some(m)=snap.local_motion.as_mut(){if m.weapon.is_none(){m.weapon=snap.players.iter().find(|p|p.local).map(|p|p.weapon.clone()).filter(|w|w!="—");}}
+                noise_tracker.update(&mut snap,Instant::now(),&map);
                 let elapsed=tick.duration_since(last_frame).as_secs_f64().max(0.001);
                 rate=if rate==0. {1./elapsed}else{rate*0.83+0.17/elapsed};last_frame=tick;
                 snap.source_hz=(rate*10.).round()/10.;Ok(snap)
             })();
             let snap=match result {
                 Ok(s)=>s,
-                Err(e)=>{proc.close();tracker.reset();cache_details.clear();Snapshot::status("error",&e)},
+                Err(e)=>{proc.close();tracker.reset();noise_tracker.reset();cache_details.clear();Snapshot::status("error",&e)},
             };
             if snap.status!="live"{
                 let msg=format!("{}: {:?}",snap.status,snap.message);

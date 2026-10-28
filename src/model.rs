@@ -26,6 +26,14 @@ pub struct Player {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalMotion {
+    pub speed:Option<f32>,pub on_ground:Option<bool>,pub ducking:Option<bool>,pub shots_fired:Option<i32>,pub weapon:Option<String>
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NoiseState {
+    pub kind:String,pub radius_units:f32,pub approximate:bool,pub age_ms:u32
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub status: String,
     pub pid: u32,
@@ -43,6 +51,8 @@ pub struct Snapshot {
     pub message: Option<String>,
     pub game_map: String,
     pub game_map_source: String,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub local_motion:Option<LocalMotion>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub noise:Option<NoiseState>,
 }
 
 pub fn now_secs() -> f64 {
@@ -57,7 +67,7 @@ impl Snapshot {
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
-            game_map: String::new(), game_map_source: String::new(),
+            game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,
         }
     }
 }
@@ -117,6 +127,7 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
             weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None});
     }
     Snapshot { status:"demo".into(),local_team:3,players,
+        local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),shots_fired:Some(0),weapon:Some("AK-47".into())}),
         bomb_carrier_id:Some(2),bomb_carrier_source:Some("inventory".into()),
         ..Snapshot::status("demo","") }
 }

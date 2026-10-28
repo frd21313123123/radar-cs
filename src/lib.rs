@@ -2,6 +2,7 @@ pub mod assets;
 pub mod game;
 pub mod gsi;
 pub mod model;
+pub mod noise;
 pub mod overlay;
 pub mod process;
 pub mod schema;

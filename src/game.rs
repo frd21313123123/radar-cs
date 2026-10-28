@@ -1,5 +1,5 @@
 //! Source 2 read-only, best-effort controller/pawn reader.
-use crate::model::{Diagnostics, Player, Snapshot, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
+use crate::model::{Diagnostics, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
 use serde_json::{json, Value};
@@ -168,6 +168,7 @@ impl CS2Reader {
         diag.set("controller_entries",json!(controllers.len()));
         diag.set("local_controller_in_slots",json!(if local!=0 && !fallback {1}else{0}));
         diag.set("local_fallback_used",json!(if fallback {1}else{0}));
+        let mut local_motion:Option<LocalMotion>=None;
         let mut seen=HashSet::new();
         let mut pawns:BTreeMap<u64,Player>=BTreeMap::new();let mut histogram:HashMap<String,u32>=HashMap::new();
         for (slot,ctl) in controllers {
@@ -213,6 +214,19 @@ impl CS2Reader {
             diag.add("position_reads");if life!="alive"{diag.add("unverified_health_positions");}
             let angles=if life=="alive"{yaw_off.and_then(|o|p.vec3(pawn+o))}else{None};
             let yaw=normalized_yaw(angles);if angles.is_some()&&yaw.is_none(){diag.add("bad_angles");}
+            if is_local && life=="alive" {
+                let vel=self.schema.field("C_BaseEntity","m_vecAbsVelocity").and_then(|o|p.vec3(pawn+o));
+                let speed=vel.map(|v|v[0].hypot(v[1])).filter(|v|v.is_finite() && *v<2000.);
+                let flags=self.schema.field("C_BaseEntity","m_fFlags").and_then(|o|p.read(pawn+o,4))
+                    .and_then(|v|v.try_into().ok()).map(u32::from_le_bytes);
+                let duck=self.schema.field("C_CSPlayerPawn","m_flDuckAmount").and_then(|o|p.read(pawn+o,4))
+                    .and_then(|v|v.try_into().ok()).map(f32::from_le_bytes)
+                    .filter(|v|v.is_finite() && (0.0..=1.1).contains(v));
+                let shots=self.schema.field("C_CSPlayerPawn","m_iShotsFired").and_then(|o|try_i32(p,pawn+o))
+                    .filter(|v|(0..=99).contains(v));
+                local_motion=Some(LocalMotion{speed,on_ground:flags.map(|f|f&1!=0),
+                    ducking:duck.map(|v|v>0.6),shots_fired:shots,weapon:None});
+            }
             let name=name_off.map(|o|p.cstr(ctl+o,128)).unwrap_or_default();
             let (mut weapon,mut inventory,mut has_c4)=("—".to_owned(),vec![],None);
             let (mut money,mut armor,mut helmet,mut defuser)=(None,0,false,false);
@@ -223,6 +237,7 @@ impl CS2Reader {
                 helmet=helmet_off.is_some_and(|o|p.u8(ctl+o)!=0);
                 defuser=defuser_off.is_some_and(|o|p.u8(ctl+o)!=0);
             }
+            if is_local {if let Some(m)=local_motion.as_mut(){if weapon!="—"{m.weapon=Some(weapon.clone());}}}
             let entry=Player{id:slot,name:if name.is_empty(){if is_local{"Вы".into()}else{format!("Player {slot}")}}else{name},
                 team,local:is_local,health:hp.filter(|n|(0..=200).contains(n)),life_state:life.into(),health_verified:life=="alive",
                 armor,helmet,defuser,money,position:xyz,yaw,weapon,inventory,has_c4,c4_source:None};
@@ -274,6 +289,6 @@ impl CS2Reader {
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,bomb_carrier_id:global_owner.or_else(||unique_bomb_carrier(&players)),
             c4_global_owner_id:global_owner,c4_unowned:unowned,players,details_read:details,
-            diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
+            local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
 }
