@@ -1,4 +1,4 @@
-use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,noise::NoiseTracker,overlay::OverlayController};
+use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,grenade::GrenadeTracker,noise::NoiseTracker,overlay::OverlayController};
 use serde_json::{json,Value};
 use std::{collections::HashMap,env,fs,path::{Path,PathBuf},sync::{Arc,Mutex},thread,time::{Duration,Instant}};
 use rand::{rngs::OsRng,RngCore};
@@ -31,11 +31,13 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     let mut reader=schema.map(CS2Reader::new);
     let mut tracker=BombTracker::default();
     let mut noise_tracker=NoiseTracker::default();
+    let mut grenade_tracker=GrenadeTracker::default();
     let mut last_scan=Instant::now()-Duration::from_secs(10);
     let mut last_map=Instant::now()-Duration::from_secs(10);
     let mut last_detail=Instant::now()-Duration::from_secs(10);
     let mut last_frame=Instant::now();let mut rate=0.;
     let mut cache_details:HashMap<u32,cas_external_radar::model::Player>=HashMap::new();
+    let mut cache_grenades:Vec<cas_external_radar::model::GrenadeView>=Vec::new();
     let mut last_log=Instant::now()-Duration::from_secs(12);
     let mut last_msg=String::new();
     loop {
@@ -61,6 +63,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 if rich{
                     cache_details=snap.players.iter().map(|p|(p.id,p.clone())).collect();last_detail=Instant::now();
                 }else{
+                    snap.grenades=cache_grenades.clone();
                     for p in &mut snap.players{if let Some(cached)=cache_details.get(&p.id){
                         p.money=cached.money;p.armor=cached.armor;p.helmet=cached.helmet;p.defuser=cached.defuser;
                         p.weapon=cached.weapon.clone();p.inventory=cached.inventory.clone();p.has_c4=cached.has_c4;
@@ -68,6 +71,8 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 }
                 let map=state.lock().map(|s|s.current_map().to_owned()).unwrap_or_default();
                 tracker.update(&mut snap,Instant::now(),&map);
+                grenade_tracker.update(&mut snap,Instant::now(),&map);
+                if rich{cache_grenades=snap.grenades.clone();}
                 if let Some(m)=snap.local_motion.as_mut(){if m.weapon.is_none(){m.weapon=snap.players.iter().find(|p|p.local).map(|p|p.weapon.clone()).filter(|w|w!="—");}}
                 noise_tracker.update(&mut snap,Instant::now(),&map);
                 let elapsed=tick.duration_since(last_frame).as_secs_f64().max(0.001);
@@ -76,7 +81,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
             })();
             let snap=match result {
                 Ok(s)=>s,
-                Err(e)=>{proc.close();tracker.reset();noise_tracker.reset();cache_details.clear();Snapshot::status("error",&e)},
+                Err(e)=>{proc.close();tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();Snapshot::status("error",&e)},
             };
             if snap.status!="live"{
                 let msg=format!("{}: {:?}",snap.status,snap.message);

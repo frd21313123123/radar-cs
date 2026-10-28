@@ -39,6 +39,16 @@ pub struct BombWorld {
     pub status: String, // "dropped" or "planted"
     pub source: String, // "entity", "planted_entity", or "recent"
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GrenadeView {
+    pub id:u32,
+    pub kind:String,
+    pub state:String,
+    pub position:[f32;3],
+    pub radius_units:f32,
+    pub trajectory:Vec<[f32;3]>,
+    pub fire_cells:Vec<[f32;3]>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub status: String,
@@ -48,6 +58,7 @@ pub struct Snapshot {
     pub bomb_carrier_id: Option<u32>,
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub bomb_world: Option<BombWorld>,
+    #[serde(default)] pub grenades:Vec<GrenadeView>,
     pub bomb_carrier_source: Option<String>,
     pub c4_unowned: bool,
     pub c4_global_owner_id: Option<u32>,
@@ -71,7 +82,7 @@ impl Snapshot {
     pub fn status(status: &str, message: &str) -> Self {
         Self {
             status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(),
-            bomb_carrier_id: None, bomb_world: None, bomb_carrier_source: None, c4_unowned: false,
+            bomb_carrier_id: None, bomb_world: None, grenades:Vec::new(), bomb_carrier_source: None, c4_unowned: false,
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
@@ -135,6 +146,12 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
             weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None});
     }
     Snapshot { status:"demo".into(),local_team:3,players,
+        grenades:vec![
+          GrenadeView{id:1001,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![]},
+          GrenadeView{id:1002,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]]},
+          GrenadeView{id:1003,kind:"smoke".into(),state:"flying".into(),position:[-1430.,-430.,-110.],radius_units:160.,
+             trajectory:vec![[-1680.,-650.,-140.],[-1600.,-560.,-80.],[-1510.,-490.,-95.],[-1430.,-430.,-110.]],fire_cells:vec![]}
+        ],
         local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),shots_fired:Some(0),weapon:Some("AK-47".into())}),
         bomb_carrier_id:Some(2),bomb_carrier_source:Some("inventory".into()),
         ..Snapshot::status("demo","") }

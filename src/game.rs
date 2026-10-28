@@ -1,5 +1,5 @@
 //! Source 2 read-only, best-effort controller/pawn reader.
-use crate::model::{BombWorld, Diagnostics, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
+use crate::model::{BombWorld, Diagnostics, GrenadeView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
 use serde_json::{json, Value};
@@ -198,6 +198,100 @@ impl CS2Reader {
         if carried.is_some(){(carried,None,false,checked)}
         else {(None,dropped,ownerless,checked)}
     }
+    fn grenade_class(name:&str)->Option<&'static str>{
+        match name {
+            "smokegrenade_projectile"=>Some("smoke"),
+            "molotov_projectile"|"incendiarygrenade_projectile"=>Some("molotov"),
+            "inferno"=>Some("inferno"),
+            _=>None,
+        }
+    }
+    fn grenade_trail<M:Memory>(&self,p:&mut M,entity:u64)->Vec<[f32;3]>{
+        let off=match self.schema.field("C_BaseCSGrenadeProjectile","m_arrTrajectoryTrailPoints"){Some(v)=>v,None=>return vec![]};
+        let raw=match p.read(entity+off,16){Some(v)=>v,None=>return vec![]};
+        let ptr=u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let count=i32::from_le_bytes(raw[8..12].try_into().unwrap());
+        if ptr<0x10000||count<=0||count>64{return vec![];}
+        let points=match p.read(ptr,count as usize*12){Some(v)=>v,None=>return vec![]};
+        points.chunks_exact(12).filter_map(|v|{
+            let x=f32::from_le_bytes(v[0..4].try_into().ok()?);
+            let y=f32::from_le_bytes(v[4..8].try_into().ok()?);
+            let z=f32::from_le_bytes(v[8..12].try_into().ok()?);
+            if [x,y,z].iter().all(|v|v.is_finite()&&v.abs()<100000.){Some([x,y,z])}else{None}
+        }).collect()
+    }
+    fn scan_grenades<M:Memory>(&mut self,p:&mut M,list:u64,diag:&mut Diagnostics)->Vec<GrenadeView>{
+        let ident_off=self.schema.field("CEntityInstance","m_pEntity").unwrap_or(0x10);
+        // The identity type is from entity2.dll (not client.dll schema JSON).
+        let scene_off=match self.schema.field("C_BaseEntity","m_pGameSceneNode"){Some(v)=>v,None=>return vec![]};
+        let origin_off=match self.schema.field("CGameSceneNode","m_vecAbsOrigin"){Some(v)=>v,None=>return vec![]};
+        let highest=self.schema.offset("dwGameEntitySystem_highestEntityIndex")
+            .map(|off|p.i32(list+off))
+            .filter(|n|(64..=8191).contains(n))
+            .unwrap_or(2048).min(4095) as usize;
+        let mut out=Vec::new();let stride=self.layout.stride;
+        for chunk in 0..=(highest>>9){
+            let block=self.block(p,list,(chunk*512) as u32);
+            if block==0{continue;}
+            for start in (0..512).step_by(128){
+                let first=chunk*512+start;
+                if first>highest{break;}
+                let count=(highest+1-first).min(128);
+                let raw=match p.read(block+start as u64*stride as u64,count*stride){Some(v)=>v,None=>continue};
+                for i in 0..count{
+                    if out.len()>=60{break;}
+                    let off=i*stride;let ptr=u64::from_le_bytes(raw[off..off+8].try_into().unwrap());
+                    if ptr<0x10000{continue;}
+                    let ident=p.u64(ptr+ident_off);
+                    if ident<0x10000{continue;}
+                    let name_ptr=p.u64(ident+0x20);
+                    if name_ptr<0x10000{continue;}
+                    let name=p.cstr(name_ptr,64).to_ascii_lowercase();
+                    let kind=match Self::grenade_class(&name){Some(n)=>n,None=>continue};
+                    let node=p.u64(ptr+scene_off);
+                    let pos=if node>=0x10000{p.vec3(node+origin_off)}else{None};
+                    let pos=match pos{Some(v)=>v,None=>continue};
+                    let index=(first+i) as u32;
+                    if kind=="inferno"{
+                        let count_off=match self.schema.field("C_Inferno","m_fireCount"){Some(v)=>v,None=>continue};
+                        let fire_count=p.i32(ptr+count_off);
+                        if !(1..=64).contains(&fire_count){continue;}
+                        let off=match self.schema.field("C_Inferno","m_firePositions"){Some(v)=>v,None=>continue};
+                        let data=match p.read(ptr+off,64*12){Some(v)=>v,None=>continue};
+                        let mask=self.schema.field("C_Inferno","m_bFireIsBurning").and_then(|o|p.read(ptr+o,64));
+                        let mut cells=Vec::new();
+                        for j in 0..fire_count as usize{
+                            if mask.as_ref().is_some_and(|m|m[j]==0){continue;}
+                            let raw=&data[j*12..j*12+12];
+                            let point=[f32::from_le_bytes(raw[0..4].try_into().unwrap()),
+                                f32::from_le_bytes(raw[4..8].try_into().unwrap()),
+                                f32::from_le_bytes(raw[8..12].try_into().unwrap())];
+                            if point.iter().all(|v|v.is_finite()&&v.abs()<100000.)&&point!=[0.,0.,0.]{cells.push(point);}
+                        }
+                        if cells.is_empty(){continue;}
+                        let n=cells.len() as f32;
+                        let center=[cells.iter().map(|p|p[0]).sum::<f32>()/n,
+                            cells.iter().map(|p|p[1]).sum::<f32>()/n,cells.iter().map(|p|p[2]).sum::<f32>()/n];
+                        let radius=cells.iter().map(|p|((p[0]-center[0]).powi(2)+(p[1]-center[1]).powi(2)).sqrt()).fold(0f32,f32::max)+38.;
+                        out.push(GrenadeView{id:index,kind:"molotov".into(),state:"active".into(),
+                            position:center,radius_units:radius.clamp(45.,250.),trajectory:vec![],fire_cells:cells});
+                    }else{
+                        let active=kind=="smoke" && self.schema.field("C_SmokeGrenadeProjectile","m_bDidSmokeEffect")
+                            .and_then(|o|p.read(ptr+o,1)).is_some_and(|v|v[0]==1);
+                        let position=if active {
+                            self.schema.field("C_SmokeGrenadeProjectile","m_vSmokeDetonationPos")
+                                .and_then(|o|p.vec3(ptr+o)).filter(|v|*v!=[0.,0.,0.]).unwrap_or(pos)
+                        }else{pos};
+                        let points=if active{vec![]}else{self.grenade_trail(p,ptr)};
+                        out.push(GrenadeView{id:index,kind:kind.into(),state:if active{"active"}else{"flying"}.into(),
+                            position,radius_units:if kind=="smoke"{160.}else{135.},trajectory:points,fire_cells:vec![]});
+                    }
+                }
+            }
+        }
+        diag.set("grenades_found",json!(out.len()));
+        out
+    }
     pub fn current_map<M:Memory>(&self,p:&mut M,base:u64)->Option<String>{
         let off=self.schema.offset("dwGlobalVars")?;let ptr=p.u64(base+off);if ptr==0{return None;}
         let strptr=p.u64(ptr+0x180);if strptr==0{return None;}
@@ -333,6 +427,7 @@ impl CS2Reader {
                 }
             }
         }
+        let grenades=if details{self.scan_grenades(p,list,&mut diag)}else{vec![]};
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
         diag.set("c4_global_unowned",json!(if unowned {1}else{0}));
@@ -367,7 +462,7 @@ impl CS2Reader {
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,
             bomb_carrier_id:if bomb_world.is_some(){None}else{global_owner.or_else(||unique_bomb_carrier(&players))},
-            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,details_read:details,
+            bomb_world,c4_global_owner_id:global_owner,c4_unowned:unowned,players,grenades,details_read:details,
             local_motion,diagnostics:diag.value(),time:now_secs(),message,..Snapshot::status(status,"")})
     }
 }

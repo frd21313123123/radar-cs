@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod game;
+pub mod grenade;
 pub mod gsi;
 pub mod model;
 pub mod noise;
