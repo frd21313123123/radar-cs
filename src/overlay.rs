@@ -16,7 +16,7 @@ pub fn screen_point(position:[f32;3], overview:(f32,f32,f32), width:f32, height:
         || scale<=0.||width<=0.||height<=0.||zoom<=0.
         || !position.iter().all(|x|x.is_finite()) {return None;}
     let uv=|p:[f32;3]|((p[0]-pos_x)/(scale*1024.),(pos_y-p[1])/(scale*1024.));
-    let (cx,cy)=center.filter(|p|p.iter().all(|x|x.is_finite())).map(uv).unwrap_or((.5,.5));
+    let (cx,cy)=center.filter(|p|p.iter().all(|x|x.is_finite())).map(uv).unwrap_or((0.5,0.5));
     let (u,v)=uv(position);
     let side=(width.min(height)-12.).max(1.)*zoom;
     Some((width/2.+(u-cx)*side,height/2.+(v-cy)*side))
@@ -262,14 +262,14 @@ mod win {
                 }0
             }
             WM_MOUSEWHEEL=>{if let Some(b)=GLOBAL.get(){let delta=((wparam>>16) as u16) as i16;
-                if let Ok(mut cfg)=b.settings.lock(){cfg.zoom=(cfg.zoom * if delta>0 {1.10}else{0.90}).clamp(.7,4.);}
+                if let Ok(mut cfg)=b.settings.lock(){cfg.zoom=(cfg.zoom * if delta>0 {1.10}else{0.90}).clamp(0.7,4.);}
             }InvalidateRect(hwnd,null(),0);0}
             WM_KEYDOWN=>{
                 if let Some(b)=GLOBAL.get(){if let Ok(mut cfg)=b.settings.lock(){match wparam {
                     0x43=>cfg.center_local=!cfg.center_local, // C
                     0x54=>cfg.topmost=!cfg.topmost, // T
                     0x6b|0xbb=>cfg.zoom=(cfg.zoom*1.1).min(4.), // +
-                    0x6d|0xbd=>cfg.zoom=(cfg.zoom*.9).max(.7), // -
+                    0x6d|0xbd=>cfg.zoom=(cfg.zoom*0.9).max(0.7), // -
                     _=>{}
                 }}update_window(hwnd);}0
             }
@@ -310,8 +310,8 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
-    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&!s.visible);assert!((s.zoom-1.5).abs()<.01);}
-    #[test]fn validate(){let mut s=OverlaySettings::default();assert!(s.update(&json!({"zoom":2.0,"visible":true,"self_color":"#00ffbb"})).is_ok());assert!(s.visible);assert!((s.zoom-2.).abs()<.01);assert!(s.update(&json!({"zoom":20})).is_err());assert!(s.update(&json!({"self_color":"red"})).is_err());}
+    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&!s.visible);assert!((s.zoom-1.5).abs()<0.01);}
+    #[test]fn validate(){let mut s=OverlaySettings::default();assert!(s.update(&json!({"zoom":2.0,"visible":true,"self_color":"#00ffbb"})).is_ok());assert!(s.visible);assert!((s.zoom-2.).abs()<0.01);assert!(s.update(&json!({"zoom":20})).is_err());assert!(s.update(&json!({"self_color":"red"})).is_err());}
     #[test]fn follow_centers_me(){let map=(-3230.,1713.,5.);let me=[-1500.,500.,5.];
         let p=screen_point(me,map,360.,500.,1.6,Some(me)).unwrap();
         assert!((p.0-180.).abs()<0.001 && (p.1-250.).abs()<0.001);

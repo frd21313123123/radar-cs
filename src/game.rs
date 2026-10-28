@@ -92,7 +92,7 @@ impl CS2Reader {
         let (active_id,active_name)=self.item(p,active).unwrap_or((0,"—".into()));
         let mut inventory=Vec::new();
         let vec_off=match self.schema.field("CPlayer_WeaponServices","m_hMyWeapons"){Some(o)=>o,None=>return(active_name,inventory,if active_id==49{Some(true)}else{None})};
-        let vec=match p.read(ptr+vec_off,12){Some(v)=>v,None=>return(active_name,if active_id!=0{vec![active_name.clone()]}else{vec![]},if active_id==49{Some(true)}else{None})};
+        let vec=match p.read(ptr+vec_off,12){Some(v)=>v,None=>return(active_name.clone(),if active_id!=0{vec![active_name.clone()]}else{vec![]},if active_id==49{Some(true)}else{None})};
         let data_ptr=u64::from_le_bytes(vec[..8].try_into().unwrap());
         let count=u32::from_le_bytes(vec[8..12].try_into().unwrap()) as usize;
         if count>64||(count>0&&data_ptr==0){return(active_name,vec![],if active_id==49{Some(true)}else{None});}
