@@ -66,8 +66,8 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 }
                 let map=state.lock().map(|s|s.current_map().to_owned()).unwrap_or_default();
                 tracker.update(&mut snap,Instant::now(),&map);
-                let elapsed=tick.duration_since(last_frame).as_secs_f64().max(.001);
-                rate=if rate==0. {1./elapsed}else{rate*.83+.17/elapsed};last_frame=tick;
+                let elapsed=tick.duration_since(last_frame).as_secs_f64().max(0.001);
+                rate=if rate==0. {1./elapsed}else{rate*0.83+0.17/elapsed};last_frame=tick;
                 snap.source_hz=(rate*10.).round()/10.;Ok(snap)
             })();
             let snap=match result {
