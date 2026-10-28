@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v1.2 — External Telemetry</title>
+<title>CAS Radar Rust v1.3 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -110,7 +110,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.2</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.3</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
@@ -122,6 +122,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   <label class="settings-row">Показывать непроверенные записи <input type="checkbox" id="showUnknown"></label>
   <label class="settings-row">Показывать направление взгляда <input type="checkbox" id="showDirection" checked></label>
   <label class="settings-row">Круг шума на веб-карте <input type="checkbox" id="showNoise" checked></label>
+  <label class="settings-row">Подписи плэнтов A / B на веб-карте <input type="checkbox" id="showSites" checked></label>
   <div class="native-overlay-panel" id="nativeOverlayPanel">
     <div class="native-overlay-head"><b>▣ Мини-радар Windows</b><span id="overlayStatus">Проверка…</span></div>
     <p>Это отдельное окно Rust/Win32, не браузер. Перемещай за системный заголовок, растягивай за рамку.</p>
@@ -130,6 +131,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
     <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
     <label class="settings-row">Круг шума на миникарте <input type="checkbox" id="nativeNoise" checked></label>
+    <label class="settings-row">Подписи плэнтов A / B на миникарте <input type="checkbox" id="nativeSites" checked></label>
     <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.5×</span> <input type="range" id="nativeZoom" min="0.7" max="4" step="0.1" value="1.5"></label>
     <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
     <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
@@ -148,16 +150,16 @@ let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='';
-const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true};
+const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true};
 let prefs={...DEFAULT_PREFS};
 const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
 function loadPrefs(){try{const saved=JSON.parse(localStorage.getItem('cas-radar-v06-settings')||'{}');
   for(const name of ['friend','enemy','own'])if(validHex(saved[name]))prefs[name]=saved[name];
-  for(const name of ['showDead','showUnknown','showDirection','showNoise'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
+  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
 }catch(_){ }applyPrefs();}
 function applyPrefs(){for(const name of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+name,prefs[name]);
   for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']])$(id).value=prefs[key];
-  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise']])$(id).checked=prefs[key];
+  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites']])$(id).checked=prefs[key];
   lastListKey='';}
 function localTeam(){let t=Number(snapshot.local_team);if(t===2||t===3)return t;
   const me=(snapshot.players||[]).find(p=>p.local);return me?.team||0;}
@@ -248,6 +250,21 @@ function draw(now){requestAnimationFrame(draw);
      if(Number.isFinite(r)&&r>1){ctx.save();ctx.fillStyle='rgba(255,192,97,0.09)';
        ctx.strokeStyle='rgba(255,207,125,0.82)';ctx.lineWidth=1.8;
        ctx.beginPath();ctx.arc(pt.x,pt.y,r,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();}
+   }
+ }
+ if(prefs.showSites){
+   const sites=mapData().bombsites;
+   if(sites)for(const name of ['A','B']){
+     const p=sites[name];
+     if(!p || !Number.isFinite(p.x) || !Number.isFinite(p.y))continue;
+     const x=left+p.x*size,y=top+p.y*size;
+     if(x < -20 || y < -20 || x > w+20 || y > h+20)continue;
+     ctx.save();ctx.beginPath();ctx.arc(x,y,12,0,Math.PI*2);
+     ctx.fillStyle='rgba(40,29,20,.91)';ctx.fill();
+     ctx.strokeStyle='#f2c477';ctx.lineWidth=1.5;ctx.stroke();
+     ctx.font='800 14px Segoe UI,Arial';ctx.fillStyle='#fff0c8';
+     ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(name,x,y+.5);
+     ctx.restore();
    }
  }
  for(const p of people){let xy0=xy(p.position);if(xy0.x<left-30||xy0.x>left+size+30||xy0.y<top-30||xy0.y>top+size+30)continue;
@@ -370,7 +387,7 @@ async function updateNativeSettings(){try {
  if(!res.ok)throw Error('HTTP '+res.status);
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise']]) $(id).checked=Boolean(d.settings?.[field]);
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites']]) $(id).checked=Boolean(d.settings?.[field]);
  $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
@@ -389,7 +406,7 @@ function nativeChange(fields){
    $('miniBtn').classList.toggle('active',d.settings.visible);
  }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise']])
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
 $('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
@@ -406,7 +423,7 @@ for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','o
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
     if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});}});
 }
-for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise']]){
+for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites']]){
   $(id).addEventListener('change',e=>{prefs[key]=e.target.checked;applyPrefs();
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
 }

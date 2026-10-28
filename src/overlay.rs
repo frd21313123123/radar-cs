@@ -30,6 +30,7 @@ pub struct OverlaySettings {
     pub center_local: bool,
     pub rotate_with_view: bool,
     pub show_noise: bool,
+    pub show_sites: bool,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -37,19 +38,20 @@ pub struct OverlaySettings {
     pub self_color: String,
 }
 impl Default for OverlaySettings {
-    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,
+    fn default()->Self {Self { visible:false,topmost:true,center_local:true,rotate_with_view:true,show_noise:true,show_sites:true,
         zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
         let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
+        for key in o.keys() {if !["visible","topmost","center_local","rotate_with_view","show_noise","show_sites","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
         if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
         if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
         if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
         if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
         if let Some(x)=o.get("show_noise"){self.show_noise=x.as_bool().ok_or("show_noise must be boolean")?;}
+        if let Some(x)=o.get("show_sites"){self.show_sites=x.as_bool().ok_or("show_sites must be boolean")?;}
         if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
@@ -164,6 +166,7 @@ mod win {
         fn GdipCreatePen1(color:u32,width:f32,unit:i32,pen:*mut *mut c_void)->i32;
         fn GdipDrawEllipseI(g:*mut c_void,pen:*mut c_void,x:i32,y:i32,w:i32,h:i32)->i32;
         fn GdipDeletePen(pen:*mut c_void)->i32;
+        fn GdipDrawLineI(g:*mut c_void,pen:*mut c_void,x1:i32,y1:i32,x2:i32,y2:i32)->i32;
         fn GdipTranslateWorldTransform(graphics:*mut c_void,dx:f32,dy:f32,order:i32)->i32;
         fn GdipRotateWorldTransform(graphics:*mut c_void,angle:f32,order:i32)->i32;
         fn GdipResetWorldTransform(graphics:*mut c_void)->i32;
@@ -227,6 +230,29 @@ mod win {
             }
         });
     }
+    /// Vector badge: rendered under GDI+ world transform, staying attached to
+    /// the overview image when the mini-radar follows or rotates.
+    fn draw_site(g:*mut c_void,x:i32,y:i32,site:char){
+        unsafe {
+            fill_circle(g,x,y,12,0xe7251d14);
+            let mut outline=null_mut();
+            if GdipCreatePen1(0xfff4c174,1.7,2,&mut outline)==0 && !outline.is_null() {
+                GdipDrawEllipseI(g,outline,x-12,y-12,24,24);
+                GdipDeletePen(outline);
+            }
+            let mut pen=null_mut();
+            if GdipCreatePen1(0xfffaebc3,2.3,2,&mut pen)!=0||pen.is_null(){return;}
+            // A and B are drawn as simple line glyphs (no font dependencies).
+            let lines:&[(i32,i32,i32,i32)]=if site=='A'{
+                &[(-6,7,0,-7),(0,-7,6,7),(-4,2,4,2)]
+            }else{
+                &[(-5,-7,-5,7),(-5,-7,2,-7),(2,-7,5,-4),(5,-4,5,-1),(5,-1,2,0),
+                  (-5,0,2,0),(2,0,6,3),(6,3,5,5),(5,5,2,7),(2,7,-5,7)]
+            };
+            for &(x1,y1,x2,y2) in lines{GdipDrawLineI(g,pen,x+x1,y+y1,x+x2,y+y2);}
+            GdipDeletePen(pen);
+        }
+    }
     fn overlay_frame(g:*mut c_void,dc:HDC,width:i32,height:i32,bridge:&WindowBridge){
         let snap=bridge.state.lock().ok().map(|st|st.snapshot());
         let (snap,mapdata,game_map)=if let Some(s)=snap {
@@ -273,6 +299,16 @@ mod win {
                             GdipDeletePen(pen);
                         }
                     }}
+                }
+            }
+        }
+        if cfg.show_sites {
+            if let Some(sites)=assets::bombsites_for_map(&game_map){
+                for (i,[u,v]) in sites.into_iter().enumerate(){
+                    let x=left+side*u;let y=top+side*v;
+                    if x.is_finite()&&y.is_finite()&&x>=-30.&&y>=-30.&&x<=width as f32+30.&&y<=height as f32+30.{
+                        draw_site(g,x.round() as i32,y.round() as i32,if i==0{'A'}else{'B'});
+                    }
                 }
             }
         }
@@ -391,6 +427,7 @@ mod win {
     use super::*;
     #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&!s.visible);assert!((s.zoom-1.5).abs()<0.01);}
     #[test]fn validate(){let mut s=OverlaySettings::default();assert!(s.update(&json!({"zoom":2.0,"visible":true,"self_color":"#00ffbb"})).is_ok());assert!(s.visible);assert!((s.zoom-2.).abs()<0.01);assert!(s.update(&json!({"zoom":20})).is_err());assert!(s.update(&json!({"self_color":"red"})).is_err());}
+    #[test]fn site_toggle(){let mut s=OverlaySettings::default();assert!(s.show_sites);assert!(s.update(&json!({"show_sites":false})).is_ok());assert!(!s.show_sites);assert!(s.update(&json!({"show_sites":"yes"})).is_err());}
     #[test]fn follow_centers_me(){let map=(-3230.,1713.,5.);let me=[-1500.,500.,5.];
         let p=screen_point(me,map,360.,500.,1.6,Some(me)).unwrap();
         assert!((p.0-180.).abs()<0.001 && (p.1-250.).abs()<0.001);

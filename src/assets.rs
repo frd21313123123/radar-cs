@@ -27,6 +27,39 @@ pub fn cached_json(url:&str,path:&Path,offline:bool,force:bool)->Option<Value>{
     }
     fs::read(path).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
 }
+/// Normalized positions taken from CS2 overview metadata (October 2026).
+/// Coordinates are fractions of the 1024x1024 radar image, not world units.
+/// Unsupported maps intentionally have no labels instead of fabricated sites.
+pub fn bombsites_for_map(name:&str)->Option<[[f32;2];2]> {
+    Some(match name {
+        "de_mirage"=>[[0.54,0.76],[0.23,0.28]],
+        "de_dust2"=>[[0.80,0.16],[0.21,0.12]],
+        "de_inferno"|"de_inferno_s2"=>[[0.81,0.69],[0.49,0.22]],
+        "de_ancient"|"de_ancient_night"|"de_ancient_v1"|"de_ancient_v2"=>[[0.31,0.25],[0.80,0.40]],
+        // Anubis is visually anchored to Valve's radar; its overview metadata
+        // does not currently publish explicit bombsite coordinates.
+        "de_anubis"=>[[0.73,0.26],[0.32,0.48]],
+        "de_nuke"=>[[0.58,0.48],[0.58,0.58]],
+        "de_train"=>[[0.63,0.49],[0.52,0.76]],
+        "de_vertigo"=>[[0.705,0.585],[0.222,0.223]],
+        "de_overpass"|"de_overpass_2v2"=>[[0.55,0.23],[0.70,0.31]],
+        "de_cache"=>[[0.325,0.26],[0.345,0.79]],
+        _=>return None,
+    })
+}
+fn with_bombsites(mut data:Value)->Value {
+    if let Some(maps)=data.get_mut("maps").and_then(Value::as_object_mut) {
+        for (name,value) in maps.iter_mut(){
+            if let (Some(points),Some(object))=(bombsites_for_map(name),value.as_object_mut()){
+                object.insert("bombsites".into(),json!({
+                    "A":{"x":points[0][0],"y":points[0][1]},
+                    "B":{"x":points[1][0],"y":points[1][1]}
+                }));
+            }
+        }
+    }
+    data
+}
 pub fn fallback_maps()->Value{
     let defs:[(&str,i32,i32,f64,&str,Option<i32>);8]=[
         ("de_mirage",-3230,1713,5.,"Mirage",None),("de_dust2",-2476,3239,4.4,"Dust II",None),
@@ -41,11 +74,11 @@ pub fn fallback_maps()->Value{
         maps.insert(key.into(),json!({"display_name":name,"radar_paths":paths,
           "radar_info":{"pos_x":x,"pos_y":y,"scale":scale,"verticalsections":layers}}));
     }
-    json!({"maps":maps})
+    with_bombsites(json!({"maps":maps}))
 }
 pub fn load_maps(cache:&Path,offline:bool,force:bool)->Value{
     let got=cached_json(MAP_SRC,&cache.join("maps.json"),offline,force);
-    if got.as_ref().and_then(|v|v["maps"].as_object()).is_some(){got.unwrap()}else{fallback_maps()}
+    if got.as_ref().and_then(|v|v["maps"].as_object()).is_some(){with_bombsites(got.unwrap())}else{fallback_maps()}
 }
 pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Result<Vec<u8>,String>{
     let name=normalize_map_name(map).ok_or("Invalid map name")?;
@@ -65,4 +98,20 @@ pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Resu
     Ok(bytes)
 }
 
-#[cfg(test)]mod tests{use super::*;#[test]fn maps_valid(){let m=fallback_maps();assert!(m["maps"]["de_mirage"]["radar_info"]["scale"].is_number());}#[test]fn reject_path(){assert!(map_image("../bad","default",&fallback_maps(),Path::new("cache"),true).is_err());}}
+#[cfg(test)]mod tests{
+    use super::*;
+    #[test]fn maps_valid(){let m=fallback_maps();assert!(m["maps"]["de_mirage"]["radar_info"]["scale"].is_number());}
+    #[test]fn reject_path(){assert!(map_image("../bad","default",&fallback_maps(),Path::new("cache"),true).is_err());}
+    #[test]fn known_sites(){assert_eq!(bombsites_for_map("de_mirage"),Some([[0.54,0.76],[0.23,0.28]]));assert_eq!(bombsites_for_map("de_vertigo"),Some([[0.705,0.585],[0.222,0.223]]));}
+    #[test]fn no_sites_on_hostage_maps(){assert!(bombsites_for_map("cs_office").is_none());assert!(bombsites_for_map("de_unknown").is_none());}
+    #[test]fn injected_into_offline_and_online_metadata(){
+        let offline=fallback_maps();
+        assert_eq!(offline["maps"]["de_mirage"]["bombsites"]["A"]["x"],0.54);
+        let online=with_bombsites(json!({"maps":{"de_cache":{"display_name":"Cache"},"cs_office":{"display_name":"Office"}}}));
+        assert_eq!(online["maps"]["de_cache"]["bombsites"]["B"]["y"],0.79);
+        assert!(online["maps"]["cs_office"].get("bombsites").is_none());
+    }
+    #[test]fn sites_fit_overview_image(){for name in ["de_mirage","de_dust2","de_inferno","de_ancient","de_anubis","de_nuke","de_train","de_vertigo","de_overpass","de_cache"]{
+        for p in bombsites_for_map(name).unwrap(){assert!(p.iter().all(|v|v.is_finite()&&(0.0..=1.0).contains(v)));}
+    }}
+}
