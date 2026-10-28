@@ -176,34 +176,53 @@ impl CS2Reader {
         let scene=self.schema.field("C_BaseEntity","m_pGameSceneNode");
         let origin=self.schema.field("CGameSceneNode","m_vecAbsOrigin");
         let owner_off=self.schema.field("C_BaseEntity","m_hOwnerEntity");
+        let game_dropped=self.schema.offset("dwGameRules").and_then(|off|{
+            let rules=p.u64(base+off);
+            self.schema.field("C_CSGameRules","m_bBombDropped")
+                .and_then(|field|if rules>=0x10000{try_u8(p,rules+field)}else{None})
+        });
         let mut carried:Option<u32>=None;
         let mut dropped:Option<BombWorld>=None;
         let mut ownerless=false;
         let mut checked=0;
         for ptr in candidates {
-            if !self.item(p,ptr).is_some_and(|(id,_)|id==49){continue;}
+            let identified=self.item(p,ptr).is_some_and(|(id,_)|id==49);
+            // Item metadata can be absent for a dropped C4; identify the
+            // actual entity by Source 2's designer name instead.
+            let entity_name={
+                let ident=p.u64(ptr+0x10);
+                if ident>=0x10000{
+                    let name_ptr=p.u64(ident+0x20);
+                    if name_ptr>=0x10000{p.cstr(name_ptr,48).to_ascii_lowercase()}else{String::new()}
+                }else{String::new()}
+            };
+            let is_c4=identified || matches!(entity_name.as_str(),
+                "weapon_c4"|"c_c4"|"c4"|"c_weapon_c4");
+            if !is_c4 {continue;}
             checked+=1;
             let raw_owner=owner_off.and_then(|o|p.read(ptr+o,4));
-            let owner=match raw_owner {
-                Some(raw)=>u32::from_le_bytes(raw.try_into().unwrap()),
-                None=>continue, // Unknown owner is not the same as dropped C4.
-            };
-            if owner!=0 && owner!=u32::MAX && (owner & 0x7fff)!=0 {
-                let pawn=self.entity(p,list,owner & 0x7fff);
+            let owner=raw_owner.as_ref().and_then(|v|v.as_slice().try_into().ok())
+                .map(u32::from_le_bytes);
+            let valid_owner=owner.filter(|o|*o!=0 && *o!=u32::MAX && (*o&0x7fff)!=0);
+            if let Some(handle)=valid_owner {
+                let pawn=self.entity(p,list,handle&0x7fff);
                 if let Some(player)=pawns.get(&pawn) {
-                    if player.team==2 && player.life_state=="alive"{carried=Some(player.id);}
+                    if player.team==2&&player.life_state=="alive" && game_dropped!=Some(1){
+                        carried=Some(player.id);
+                    }
                 }
-                continue;
             }
+            // A stale owner handle is common while a dropped weapon is
+            // changing state. Explicit GameRules.m_bBombDropped wins.
+            let is_dropped=game_dropped==Some(1) || valid_owner.is_none();
+            if !is_dropped {continue;}
             ownerless=true;
             if dropped.is_some(){continue;}
             let xyz=scene.and_then(|o|{let node=p.u64(ptr+o);
-                if node!=0 {origin.and_then(|vo|p.vec3(node+vo))}else{None}})
-                .filter(|v|*v!=[0.,0.,0.]);
-            let last=self.schema.field("C_C4","m_vecLastValidDroppedPosition")
-                .and_then(|o|p.vec3(ptr+o)).filter(|v|*v!=[0.,0.,0.]);
-            if let Some(pos)=xyz.or(last) {
-                dropped=Some(BombWorld{position:pos,status:"dropped".into(),source:"entity".into()});
+                if node>=0x10000{origin.and_then(|vo|p.vec3(node+vo))}else{None}})
+                .filter(|v|v.iter().all(|x|x.is_finite()&&x.abs()<100000.) && *v!=[0.,0.,0.]);
+            if let Some(position)=xyz {
+                dropped=Some(BombWorld{position,status:"dropped".into(),source:"entity".into()});
             }
         }
         // A planted bomb is a separate entity; it must not be shown as "dropped".
@@ -238,17 +257,21 @@ impl CS2Reader {
         else{None}
     }
     fn grenade_trail<M:Memory>(&self,p:&mut M,entity:u64)->Vec<[f32;3]>{
-        let off=match self.schema.field("C_BaseCSGrenadeProjectile","m_arrTrajectoryTrailPoints"){Some(v)=>v,None=>return vec![]};
+        let off=match self.schema.field("C_BaseCSGrenadeProjectile","m_arrTrajectoryTrailPoints"){
+            Some(off)=>off,None=>return vec![]
+        };
+        // The network vector can be empty or temporarily uninitialized.
+        // Read only the proven count; otherwise use sampled entity positions.
         let raw=match p.read(entity+off,16){Some(v)=>v,None=>return vec![]};
         let ptr=u64::from_le_bytes(raw[0..8].try_into().unwrap());
         let count=i32::from_le_bytes(raw[8..12].try_into().unwrap());
-        if ptr<0x10000||count<=0||count>64{return vec![];}
-        let points=match p.read(ptr,count as usize*12){Some(v)=>v,None=>return vec![]};
-        points.chunks_exact(12).filter_map(|v|{
-            let x=f32::from_le_bytes(v[0..4].try_into().ok()?);
-            let y=f32::from_le_bytes(v[4..8].try_into().ok()?);
-            let z=f32::from_le_bytes(v[8..12].try_into().ok()?);
-            if [x,y,z].iter().all(|v|v.is_finite()&&v.abs()<100000.){Some([x,y,z])}else{None}
+        if ptr<0x10000||!(1..=64).contains(&count){return vec![];}
+        let bytes=match p.read(ptr,count as usize*12){Some(v)=>v,None=>return vec![]};
+        bytes.chunks_exact(12).filter_map(|v|{
+            let a=[f32::from_le_bytes(v[0..4].try_into().ok()?),
+                f32::from_le_bytes(v[4..8].try_into().ok()?),
+                f32::from_le_bytes(v[8..12].try_into().ok()?)];
+            if a.iter().all(|x|x.is_finite()&&x.abs()<100000.){Some(a)}else{None}
         }).collect()
     }
     fn scan_grenades<M:Memory>(&mut self,p:&mut M,list:u64,diag:&mut Diagnostics)->Vec<GrenadeView>{
@@ -331,6 +354,13 @@ impl CS2Reader {
             }
         }
         diag.set("grenades_found",json!(out.len()));
+        diag.set("grenades_by_type",json!({
+            "smoke":out.iter().filter(|g|g.kind=="smoke").count(),
+            "molotov":out.iter().filter(|g|g.kind=="molotov").count(),
+            "he":out.iter().filter(|g|g.kind=="he").count(),
+            "flash":out.iter().filter(|g|g.kind=="flash").count(),
+            "decoy":out.iter().filter(|g|g.kind=="decoy").count()
+        }));
         out
     }
 
@@ -522,6 +552,7 @@ impl CS2Reader {
             global_owner=owner;bomb_world=world;unowned=ownerless;
             diag.set("c4_entities_scanned",json!(scanned));
             diag.set("c4_world_found",json!(bomb_world.is_some()));
+            diag.set("c4_on_ground",json!(bomb_world.as_ref().is_some_and(|b|b.status=="dropped")));
             if let Some(id)=owner {
                 if let Some(player)=pawns.values_mut().find(|player|player.id==id) {
                     player.has_c4=Some(true);player.c4_source=Some("entity_owner".into());

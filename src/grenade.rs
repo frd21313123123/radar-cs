@@ -13,9 +13,17 @@ impl GrenadeTracker{
     let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None});
     let far=t.points.last().is_some_and(|p|distance(*p,g.position)>1600.);
     if t.kind!=g.kind||far{t.kind=g.kind.clone();t.points.clear();t.active_at=None;}
-    if !g.trajectory.is_empty(){t.points=g.trajectory.iter().copied()
-        .filter(|p|p.iter().all(|x|x.is_finite()&&x.abs()<100000.)).take(64).collect();}
-    if t.points.last().is_none_or(|p|distance(*p,g.position)>8.){t.points.push(g.position);}
+    if g.trajectory.len()>=2 {
+      // Merge with sampled positions instead of replacing existing tracks
+      // with a shorter/broken game history after every update.
+      let incoming:Vec<[f32;3]>=g.trajectory.iter().copied()
+        .filter(|p|p.iter().all(|x|x.is_finite()&&x.abs()<100000.)).take(64).collect();
+      if incoming.len()>t.points.len() && incoming.last()
+          .is_some_and(|last|distance(*last,g.position)<2000.) {
+        t.points=incoming;
+      }
+    }
+    if t.points.last().is_none_or(|p|distance(*p,g.position)>3.){t.points.push(g.position);}
     if t.points.len()>40{t.points.drain(0..t.points.len()-40);}
     t.last=now;g.trajectory=t.points.clone();
    }else if let Some(t)=self.tracks.get_mut(&g.id){
@@ -57,6 +65,16 @@ fn distance(a:[f32;3],b:[f32;3])->f32{((a[0]-b[0]).powi(2)+(a[1]-b[1]).powi(2)+(
   assert!(s.grenades.iter().any(|g|g.id==id&&g.state=="finished"));
   s.grenades.clear();t.update(&mut s,at+Duration::from_millis(850),"de_mirage");
   assert!(s.grenades.is_empty());
+ }
+ #[test]fn existing_path_does_not_shrink(){
+  let mut t=GrenadeTracker::default();let at=Instant::now();
+  let mut s=demo_snapshot(0.);s.grenades_read=true;
+  let i=s.grenades.iter().position(|g|g.state=="flying").unwrap();
+  t.update(&mut s,at,"de_mirage");
+  let n=s.grenades[i].trajectory.len();
+  s.grenades[i].trajectory=vec![s.grenades[i].position];
+  t.update(&mut s,at+Duration::from_millis(100),"de_mirage");
+  assert!(s.grenades[i].trajectory.len()>=n);
  }
  #[test]fn reset_on_map_change(){
   let mut t=GrenadeTracker::default();let start=Instant::now();let mut s=demo_snapshot(0.);s.grenades_read=true;

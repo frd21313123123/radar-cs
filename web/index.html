@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v1.8 — External Telemetry</title>
+<title>CAS Radar Rust v1.9 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -100,19 +100,20 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 @media(max-width:650px){.native-overlay-head{flex-wrap:wrap}}
 
 .bomb-countdown[hidden]{display:none!important}
-.bomb-countdown{position:absolute;z-index:7;top:65px;left:15px;display:flex;align-items:center;gap:7px;
-  width:158px;min-height:62px;padding:6px 8px 6px 5px;background:rgba(11,16,22,.96);
-  box-shadow:0 5px 16px rgba(0,0,0,.42);border:1px solid #273641;border-radius:9px;
-  color:#eef5f8;font:11px/1.45 'Segoe UI',Arial,sans-serif;font-variant-numeric:tabular-nums;
-  pointer-events:none}
-.bomb-ring{position:relative;width:45px;height:45px;flex:none;display:grid;place-items:center}
+.bomb-countdown{position:absolute;z-index:7;top:65px;left:16px;display:flex;align-items:center;
+  gap:13px;width:232px;min-height:96px;padding:10px 13px;
+  background:rgba(10,16,24,.96);box-shadow:0 5px 20px #0008;
+  border:1px solid #334653;border-radius:10px;color:#eef5f8;
+  font:16px/1.35 'Segoe UI',Arial,sans-serif;font-variant-numeric:tabular-nums;pointer-events:none}
+.bomb-ring{position:relative;width:66px;height:66px;flex:none;display:grid;place-items:center}
 .bomb-ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
 .bomb-ring circle{fill:none;stroke-width:4;stroke-linecap:round}
-.bomb-ring .track{stroke:#2b3946}.bomb-ring .progress{stroke:#25c5ef;transition:stroke .2s}
+.bomb-ring .track{stroke:#324555}.bomb-ring .progress{stroke:#25c5ef}
 .bomb-ring .bomb-symbol{font-size:18px;color:#edf6f8}
 .bomb-fields{flex:1;min-width:0}.bomb-fields div{white-space:nowrap}
-.bomb-fields b{color:#38d3f4;font-weight:750}
-@media(max-width:650px){.bomb-countdown{top:63px;left:8px;transform:scale(.88);transform-origin:top left}}
+.bomb-fields b{color:#46d3f3;font-weight:750}
+.bomb-time-number{font-weight:800;font-size:23px;color:#e8f9ff}
+@media(max-width:650px){.bomb-countdown{top:63px;left:7px;transform:scale(.87);transform-origin:top left}}
 </style></head>
 <body><div class="layout">
 <header><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/></svg></div><div><div class="brand-name">CAS<span style="color:var(--aqua)">.</span>RADAR</div><div class="brand-caption">EXTERNAL <strong>READ-ONLY</strong> TELEMETRY</div></div></div><div class="pills"><div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">CONNECTING</span></div><div class="pill demo" id="demoPill" style="display:none">SIMULATION MODE</div><div class="pill"><span>PLAYERS</span><b id="playerCount">00</b></div><div class="pill mono" title="Фактическая частота отрисовки / чтения данных"><b id="fpsHud">FPS —</b><span id="sourceHud">DATA — Hz</span></div></div></header>
@@ -126,15 +127,14 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <circle class="track" cx="24" cy="24" r="20"></circle>
     <circle class="progress" id="bombTimerProgress" cx="24" cy="24" r="20"></circle>
   </svg><span class="bomb-symbol">▣</span></div>
-  <div class="bomb-fields"><div>Сайт: <b id="bombTimerSite">?</b></div>
-    <div>ХП: <b id="bombTimerHp">—</b></div>
-    <div>Время: <b id="bombTimerSecs">—</b> сек</div></div>
+  <div class="bomb-fields"><div>Плэнт: <b id="bombTimerSite">?</b></div>
+    <div class="bomb-time-number"><span id="bombTimerSecs">—</span><small style="font-size:12px"> сек</small></div></div>
 </div><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
 <div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">SCROLL TO ZOOM · DRAG TO PAN · CLICK TO INSPECT</span></div></section><aside class="side-column side-ct" aria-label="Спецназ">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.8</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.9</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
@@ -215,7 +215,7 @@ function setMap(v){if(!maps[v])return;map=v;layer='default';scale=1;panX=panY=0;
   loadMapImage();}
 async function loadMapImage(){let key=map+'/'+layer;lastMapImageKey=key;mapImg=null;mapVersion++;
   const m=mapData();if(!m.radar_paths?.length){setNotice('Для этой карты нет доступного изображения радара.');return;}
-  let img=new Image();img.onload=()=>{if(key===lastMapImageKey){mapImg=img;mapVersion++;if(snapshot.status==='live'||snapshot.status==='demo')setNotice('');}};
+  let img=new Image();img.onload=()=>{if(key===lastMapImageKey){mapImg=img;mapVersion++;baseCacheKey='';setNotice('');}};
   img.onerror=()=>{if(key===lastMapImageKey){mapImg=null;setNotice('Изображение карты недоступно. Подключите интернет или проверьте cache.');}};
   img.src=api('/api/map-image?map='+encodeURIComponent(map)+'&layer='+encodeURIComponent(layer));}
 function transform(p){const d=mapData().radar_info||{};const k=Number(d.scale)||5;const x=Number(d.pos_x)||0,y=Number(d.pos_y)||0;
@@ -274,16 +274,11 @@ function updateBombCountdown(){
    panel.hidden=true;return;
  }
  // Server snapshot is timestamped on the same machine; animate at RAF rate.
- const age=Math.max(0,Math.min(.75,Date.now()/1000-Number(snapshot.time||0)));
+ const age=Math.max(0,Math.min(1.5,Date.now()/1000-Number(snapshot.time||0)));
  const seconds=Math.max(0,bomb.remaining_secs-age);
  if(seconds<=0){panel.hidden=true;return;}
  panel.hidden=false;
  $('bombTimerSite').textContent=bomb.site||'?';
- const local=(snapshot.players||[]).find(p=>p.local&&p.life_state==='alive');
- const watchedId=snapshot.observer_view?.player_id;
- const watched=(snapshot.players||[]).find(p=>p.id===watchedId);
- const hp=local?.health??watched?.health;
- $('bombTimerHp').textContent=Number.isFinite(hp)?String(hp):'—';
  $('bombTimerSecs').textContent=seconds.toFixed(1);
  const fraction=Math.max(0,Math.min(1,seconds/bomb.total_secs));
  const perimeter=2*Math.PI*20;
@@ -480,7 +475,9 @@ function updateStatus(){
 
 async function poll(){try{const r=await fetch(api('/api/state'),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);acceptSnapshot(await r.json());updateStatus();repaintPlayers();}
 catch(e){$('statusText').textContent='DISCONNECTED';$('statusDot').className='dot error';setNotice('Соединение с CAS Radar потеряно: '+e.message);}setTimeout(poll,75);}
-async function init(){loadPrefs();fit();window.addEventListener('resize',fit);try{const r=await fetch(api('/api/maps'));if(!r.ok)throw Error('Map list HTTP '+r.status);maps=(await r.json()).maps||{};
+async function init(){loadPrefs();fit();window.addEventListener('resize',fit);
+  // The radar container may change size without a browser window resize.
+  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const r=await fetch(api('/api/maps'));if(!r.ok)throw Error('Map list HTTP '+r.status);maps=(await r.json()).maps||{};
   let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale&&maps[k].radar_paths?.length).sort();$('mapSelect').innerHTML=keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
   let saved=null;try{saved=localStorage.getItem('cas-map');}catch(_){}
   setMap(maps[saved]?saved:maps['de_mirage']?'de_mirage':keys[0]);

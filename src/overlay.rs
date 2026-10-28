@@ -113,7 +113,7 @@ mod win {
     use std::{cell::RefCell,ffi::c_void,ptr::{null,null_mut},sync::{OnceLock,atomic::{AtomicIsize,Ordering}},thread,time::{Duration,Instant}};
     type HWND=*mut c_void;
     type HDC=*mut c_void;
-    const WM_CLOSE:u32=0x10;const WM_DESTROY:u32=0x02;const WM_PAINT:u32=0x0F;const WM_ERASEBKGND:u32=0x14;
+    const WM_CLOSE:u32=0x10;const WM_DESTROY:u32=0x02;const WM_PAINT:u32=0x0F;const WM_ERASEBKGND:u32=0x14;const WM_GETMINMAXINFO:u32=0x24;
     const WM_TIMER:u32=0x113;const WM_MOUSEWHEEL:u32=0x20A;const WM_KEYDOWN:u32=0x100;const WM_APP_SETTINGS:u32=0x8001;
     const SW_HIDE:i32=0;const SW_SHOW:i32=5;
     const WS_OVERLAPPEDWINDOW:u32=0x00cf0000;const WS_EX_TOPMOST:u32=0x00000008;
@@ -122,6 +122,7 @@ mod win {
     const SRCCOPY:u32=0x00CC0020; // CAS_ANTI_FLICKER_V11
     #[repr(C)]#[derive(Default,Clone,Copy)]struct Rect {left:i32,top:i32,right:i32,bottom:i32}
     #[repr(C)]#[derive(Default,Clone,Copy)]struct Point {x:i32,y:i32}
+    #[repr(C)]struct MinMaxInfo{reserved:Point,max_size:Point,max_position:Point,min_track_size:Point,max_track_size:Point}
     #[repr(C)]struct Paint {hdc:HDC,erase:i32,rect:Rect,restore:i32,inc_update:i32,reserved:[u8;32]}
     impl Default for Paint {fn default()->Self{unsafe{std::mem::zeroed()}}}
     #[repr(C)]struct WindowClass {style:u32,proc:Option<unsafe extern "system" fn(HWND,u32,usize,isize)->isize>,cls_extra:i32,wnd_extra:i32,
@@ -152,6 +153,9 @@ mod win {
     #[link(name="gdi32")]extern "system" {
         fn SetBkMode(dc:HDC,mode:i32)->i32;fn SetTextColor(dc:HDC,color:u32)->u32;
         fn TextOutW(dc:HDC,x:i32,y:i32,text:*const u16,len:i32)->i32;
+        fn CreateFontW(height:i32,width:i32,escapement:i32,orientation:i32,weight:i32,
+            italic:u32,underline:u32,strike:u32,charset:u32,out_precision:u32,
+            clip_precision:u32,quality:u32,pitch:u32,face:*const u16)->*mut c_void;
         fn CreateCompatibleDC(dc:HDC)->HDC;
         fn CreateCompatibleBitmap(dc:HDC,width:i32,height:i32)->*mut c_void;
         fn SelectObject(dc:HDC,obj:*mut c_void)->*mut c_void;
@@ -296,22 +300,17 @@ mod win {
     fn draw_bomb_panel(g:*mut c_void,remaining:f32,total:f32){
         if !remaining.is_finite()||!total.is_finite()||total<=0.0{return;}
         unsafe{
-            let panel=brush(g,0xf10c1117);
-            if !panel.is_null(){
-                GdipFillRectangleI(g,panel,10,32,151,65);
-                GdipDeleteBrush(panel);
+            let b=brush(g,0xf40b121b);
+            if !b.is_null(){GdipFillRectangleI(g,b,9,35,241,91);GdipDeleteBrush(b);}
+            let mut border=null_mut();
+            if GdipCreatePen1(0xff395361,1.4,2,&mut border)==0&&!border.is_null(){
+                GdipDrawEllipseI(g,border,21,53,57,57);GdipDeletePen(border);
             }
-            let mut track=null_mut();
-            if GdipCreatePen1(0xff293743,3.4,2,&mut track)==0&&!track.is_null(){
-                GdipDrawEllipseI(g,track,21,44,39,39);
-                GdipDeletePen(track);
-            }
-            let color=if remaining<=5.0{0xffff5f70}
-                else if remaining<=10.0{0xffffb55b}else{0xff25c5ef};
-            let mut progress=null_mut();
-            if GdipCreatePen1(color,3.5,2,&mut progress)==0&&!progress.is_null(){
-                GdipDrawArcI(g,progress,21,44,39,39,-90.0,360.0*(remaining/total).clamp(0.0,1.0));
-                GdipDeletePen(progress);
+            let color=if remaining<=5.0{0xffff6170}else if remaining<=10.0{0xffffb45b}else{0xff25c5ef};
+            let mut arc=null_mut();
+            if GdipCreatePen1(color,5.0,2,&mut arc)==0&&!arc.is_null(){
+                GdipDrawArcI(g,arc,21,53,57,57,-90.0,360.0*(remaining/total).clamp(0.0,1.0));
+                GdipDeletePen(arc);
             }
         }
     }
@@ -454,19 +453,14 @@ mod win {
             if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32,y as i32-18,4,0xffffcb70);}
         }
         if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
-        let bomb_lines=if cfg.show_bomb_timer {
+        let bomb_lines=if cfg.show_bomb_timer{
             snap.bomb_timer.as_ref().and_then(|timer|{
-                let age=(crate::model::now_secs()-snap.time).clamp(0.0,0.75) as f32;
+                let age=(crate::model::now_secs()-snap.time).clamp(0.0,1.5) as f32;
                 let remaining=(timer.remaining_secs-age).max(0.0);
                 if remaining<=0.0 {return None;}
                 draw_bomb_panel(g,remaining,timer.total_secs);
-                let site=timer.site.as_deref().unwrap_or("?");
-                let hp=snap.players.iter().find(|p|p.local&&p.life_state=="alive")
-                    .or_else(||snap.observer_view.as_ref().and_then(|o|
-                        o.player_id.and_then(|id|snap.players.iter().find(|p|p.id==id))))
-                    .and_then(|p|p.health).map(|hp|hp.to_string()).unwrap_or_else(||"—".into());
-                Some([format!("Сайт: {site}"),format!("ХП: {hp}"),
-                    format!("Время: {remaining:.1} сек")])
+                Some([format!("Плэнт: {}",timer.site.as_deref().unwrap_or("?")),
+                    format!("{remaining:.1} сек")])
             })
         }else{None};
         BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
@@ -482,7 +476,7 @@ mod win {
         STATUS.with(|s|{*s.borrow_mut()=text;});
     }
     thread_local!{static STATUS:RefCell<String>=const{RefCell::new(String::new())};}
-    thread_local!{static BOMB_LINES:RefCell<Option<[String;3]>>=const{RefCell::new(None)};}
+    thread_local!{static BOMB_LINES:RefCell<Option<[String;2]>>=const{RefCell::new(None)};}
     unsafe fn update_window(hwnd:HWND){
         let bridge=match GLOBAL.get(){Some(b)=>b,None=>return};
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
@@ -526,6 +520,13 @@ mod win {
                     _=>{}
                 }}update_window(hwnd);}0
             }
+            WM_GETMINMAXINFO=>{
+                if lparam!=0{
+                    let info=&mut *(lparam as *mut MinMaxInfo);
+                    info.min_track_size=Point{x:295,y:205};
+                }
+                0
+            }
             WM_PAINT=>{
                 let mut paint=Paint::default();let screen=BeginPaint(hwnd,&mut paint);
                 if !screen.is_null(){
@@ -546,11 +547,23 @@ mod win {
                             STATUS.with(|s|{let t=wide(&s.borrow());if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}});
                             BOMB_LINES.with(|data|{
                                 if let Some(lines)=data.borrow().as_ref(){
-                                    SetTextColor(mem,0x00ebeff7);
-                                    let mark=wide("▣");TextOutW(mem,32,57,mark.as_ptr(),(mark.len()-1) as i32);
-                                    for (i,line) in lines.iter().enumerate(){
-                                        let t=wide(line);TextOutW(mem,66,34+(i as i32)*19,t.as_ptr(),(t.len()-1) as i32);
+                                    let face=wide("Segoe UI");
+                                    let face_bold=CreateFontW(-21,0,0,0,700,0,0,0,1,0,0,5,0,face.as_ptr());
+                                    let face_small=CreateFontW(-16,0,0,0,500,0,0,0,1,0,0,5,0,face.as_ptr());
+                                    SetTextColor(mem,0x00dbe8f4);
+                                    if !face_small.is_null(){
+                                        let old=SelectObject(mem,face_small);
+                                        let t=wide(&lines[0]);TextOutW(mem,95,57,t.as_ptr(),(t.len()-1) as i32);
+                                        SelectObject(mem,old);DeleteObject(face_small);
                                     }
+                                    if !face_bold.is_null(){
+                                        let old=SelectObject(mem,face_bold);
+                                        SetTextColor(mem,0x00f7d5a1);
+                                        let t=wide(&lines[1]);TextOutW(mem,95,82,t.as_ptr(),(t.len()-1) as i32);
+                                        SelectObject(mem,old);DeleteObject(face_bold);
+                                    }
+                                    let center=wide("C4");
+                                    TextOutW(mem,36,72,center.as_ptr(),(center.len()-1) as i32);
                                     SetTextColor(mem,0x00c9e5ee);
                                 }
                             });
