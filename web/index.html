@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CAS Radar Rust v0.9 — External Telemetry</title>
+<style>
+:root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
+.layout{display:grid;grid-template-rows:68px minmax(0,1fr) 38px;height:100dvh;max-width:1800px;margin:0 auto;border-left:1px solid #17212c;border-right:1px solid #17212c}
+header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 25px;border-bottom:1px solid var(--line);background:#0b1119df}
+.brand{display:flex;align-items:center;gap:14px;white-space:nowrap}.mark{height:36px;width:36px;border:1px solid #377e75;border-radius:9px;background:linear-gradient(145deg,#152e33,#0c191c);display:grid;place-items:center;box-shadow:inset 0 0 17px #1ef9c119;color:var(--aqua)}.mark svg{width:21px;height:21px}.brand-name{font-size:18px;letter-spacing:.24em;font-weight:800}.brand-caption{font-size:10px;letter-spacing:.18em;color:var(--sub);margin-top:4px}.brand-caption strong{color:var(--aqua);font-weight:600}
+.pills{display:flex;align-items:center;gap:12px}.pill{display:flex;align-items:center;gap:8px;border:1px solid var(--line);padding:9px 12px;border-radius:7px;background:#131c25;color:#a9b9c5;font-size:11px;font-weight:700;letter-spacing:.06em}.pill b{color:#e9f5f6}.dot{height:7px;width:7px;border-radius:50%;background:#596978}.dot.live{background:var(--aqua);box-shadow:0 0 10px #6bffcf}.dot.error{background:var(--red)}.pill.demo{border-color:#79562f;color:var(--orange)}.dot.warning{background:var(--orange);box-shadow:0 0 8px #ffb56666}#diagBtn{border-color:#75583a;color:#ffd0a0}#diagBtn:focus-visible{outline-color:var(--orange)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:0}.map-column{position:relative;min-width:0;display:flex;flex-direction:column;padding:19px 24px 18px;border-right:1px solid var(--line)}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.eyebrow{color:var(--aqua);text-transform:uppercase;letter-spacing:.22em;font-size:10px;font-weight:800}.heading{display:flex;align-items:center;gap:12px;margin-top:7px}.heading h1{font-size:22px;letter-spacing:-.04em;line-height:1;margin:0;font-weight:750}.heading .sub{font-size:11px;color:var(--sub)}.control-row{display:flex;align-items:center;gap:8px}
+select,.small-btn{appearance:none;border:1px solid #2b3b4c;background:#151f2c;color:#e9eff6;border-radius:7px;padding:9px 13px;font-size:12px;font-weight:600;white-space:nowrap}.small-btn:hover,select:hover{border-color:#567184}.small-btn.active{background:#183d37;color:var(--aqua);border-color:#37796c}.map-select{min-width:132px;max-width:175px}.view-select{max-width:110px}
+.map-wrap{min-height:0;flex:1;position:relative;border:1px solid #34424e;background:linear-gradient(170deg,#111f29,#0e171d);border-radius:12px;overflow:hidden;display:grid;place-items:center;isolation:isolate}.map-wrap:before{content:"";position:absolute;inset:0;background:linear-gradient(transparent 24px,#cdefff09 25px),linear-gradient(90deg,transparent 24px,#cdefff09 25px);background-size:25px 25px;pointer-events:none;z-index:0}.map-wrap:after{content:"";position:absolute;inset:0;box-shadow:inset 0 0 90px #02050a99;pointer-events:none;z-index:5}
+#mapBase{position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none}#radar{position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none;z-index:1}#radar.dragging{cursor:grabbing}.radar-label{position:absolute;z-index:2;pointer-events:none;top:17px;left:19px;background:#0d151dde;border:1px solid #2d444b;padding:9px 12px;border-radius:7px;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#7bbaaa}.radar-label em{font-style:normal;font-weight:800;color:#e3fcf5}.radar-right{position:absolute;right:15px;top:15px;z-index:4;display:flex;flex-direction:column;gap:8px}.radar-tool{width:35px;height:35px;border-radius:7px;border:1px solid #3d4d59;background:#0f1a22dc;color:#eef9fb;font-size:20px}.radar-tool:hover{border-color:var(--aqua);color:var(--aqua)}
+#notice{position:absolute;inset:auto 12px 16px;max-width:min(440px,85%);z-index:3;background:#0a1019ea;padding:12px 16px;border:1px solid #324150;border-radius:7px;font-size:12px;line-height:1.5;color:#c2ced4;display:none}#notice.show{display:block}
+.legend{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:14px;font-size:11px;color:var(--sub)}.legend>div{display:flex;align-items:center;gap:15px}.key{display:inline-flex;align-items:center;gap:7px}.key i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ct)}.key i.t{background:var(--t)}.key i.you{background:var(--aqua)}.legend .hint{color:#64778b}
+.sidebar{display:flex;flex-direction:column;min-height:0;background:#0e141d}.side-head{padding:22px 20px 15px;border-bottom:1px solid var(--line)}.side-top{display:flex;align-items:center;justify-content:space-between}.side-top h2{font-size:14px;letter-spacing:.08em;margin:0;text-transform:uppercase}.counter{font-size:12px;background:#1c2b34;color:#d9efe9;padding:5px 8px;border-radius:5px}.filter{width:100%;border:1px solid #2a3945;background:#121e29;border-radius:6px;padding:11px 12px;color:#f5fbfc;margin-top:16px;font-size:12px;outline:none}.filter:focus{border-color:var(--aqua)}
+.teams{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:15px 20px}.team-button{background:#131d28;border:1px solid #273743;border-radius:7px;padding:11px 7px;color:#a1b1bf;font-size:11px;font-weight:750;letter-spacing:.05em}.team-button .number{color:var(--ink);font-size:15px;margin-left:5px}.team-button.on{background:#1c3141;border-color:#4d7186}.team-button.on.t{background:#3d2a27;border-color:#96674a}.players{min-height:0;overflow-y:auto;scrollbar-color:#314353 transparent;scrollbar-width:thin;padding:1px 12px 20px}.player{padding:13px 12px;border-radius:8px;border:1px solid transparent;transition:background .15s,border-color .15s;cursor:pointer;margin-bottom:5px}.player:hover,.player.selected{background:#18232e;border-color:#304450}.player.selected{border-color:#4ba999}.pr-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.pr-left{display:flex;align-items:center;gap:9px;min-width:0}.pr-dot{width:9px;height:9px;border-radius:50%;background:var(--ct);box-shadow:0 0 12px #72b9ff44;flex:0 0 auto}.pr-dot.t{background:var(--t);box-shadow:0 0 12px #ff9e7444}.pr-dot.you{background:var(--aqua)}.pr-name{font-weight:700;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr-hp{color:#a9e4c6;font-size:11px;font-variant-numeric:tabular-nums;flex-shrink:0}.pr-stats{padding:10px 0 0 18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:10px;color:#889aaa}.pr-stat{background:#1c2a35;border:1px solid #293944;padding:4px 6px;border-radius:4px}.pr-stat.money{color:#cfdfc7}.pr-weapon{color:#a9d5e7}.inventory{padding:8px 0 0 18px;color:#7c91a2;font-size:10px;line-height:1.6;display:none}.player.selected .inventory{display:block}
+footer{border-top:1px solid #1e2c38;background:#0c121a;display:flex;align-items:center;justify-content:space-between;padding:0 24px;color:#6d7d8e;font-size:10px;letter-spacing:.04em;gap:12px}footer strong{font-weight:600;color:var(--aqua)}.mono{font-family:Consolas,ui-monospace,monospace}
+@media(max-width:900px){main{grid-template-columns:minmax(0,1fr) 250px}.map-column{padding:15px}.control-row{flex-wrap:wrap;justify-content:end}.heading h1{font-size:18px}.pill:nth-child(2){display:none}}
+@media(max-width:650px){body{overflow:auto}.layout{height:100dvh;grid-template-rows:61px minmax(0,1fr) 31px}header{padding:0 14px}.brand-name{font-size:16px}.brand-caption{font-size:9px}.pill{padding:7px;font-size:10px}main{display:flex;flex-direction:column;overflow-y:auto}.map-column{height:min(75vh,650px);min-height:360px;flex-shrink:0;padding:12px}.heading h1{font-size:17px}.heading .sub{display:none}.section-head{gap:8px}.control-row{gap:5px}.map-select{min-width:90px;max-width:125px}.view-select{max-width:90px}select,.small-btn{padding:7px;font-size:11px}.sidebar{min-height:220px;overflow:visible}.players{overflow:visible}.side-head{padding:13px}.teams{margin:11px 13px}.legend{font-size:10px}footer{padding:0 11px}footer .optional{display:none}}
+
+@media(max-width:650px){
+ html,body{width:100%;max-width:100%;overflow-x:hidden}
+ .layout,.map-column,.sidebar,main,.section-head{min-width:0;width:100%;max-width:100%}
+ header{min-width:0;overflow:hidden;gap:8px}
+ header .pills{min-width:0;flex-shrink:1}
+ header .pills .pill:not(#statusPill){display:none!important}
+ .brand{min-width:0;flex-shrink:0}.brand-name{font-size:14px}
+ .section-head{flex-direction:column;align-items:flex-start;gap:10px}
+ .section-head .control-row{width:100%;max-width:100%;justify-content:flex-start;flex-wrap:wrap}
+ .map-column{height:min(76vh,650px);min-height:370px}
+ .settings-backdrop{width:100vw;max-width:100vw}
+ .settings-box{width:min(420px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow-y:auto}
+}
+/* v0.6 theme controls / state overlays */
+.key i.friend{background:var(--friend)}.key i.enemy{background:var(--enemy)}.key i.you{background:var(--own)}
+.settings-backdrop[hidden]{display:none}.settings-backdrop{position:fixed;inset:0;z-index:20;background:#02070bbb;display:flex;align-items:center;justify-content:center;padding:20px}
+.settings-box{background:#131f2b;border:1px solid #3a5362;border-radius:12px;padding:21px;width:min(420px,96vw);box-shadow:0 20px 70px #0009;display:flex;flex-direction:column;gap:16px}
+.settings-box h2{font-size:18px;margin:0}.settings-box p{margin:0;color:#96acba;font-size:12px;line-height:1.5}
+.settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:4px 0;font-size:13px}
+.settings-row input[type=color]{width:52px;height:34px;border:1px solid #415365;padding:2px;background:#0b1219;border-radius:6px;cursor:pointer}
+.settings-row input[type=checkbox]{width:18px;height:18px;accent-color:var(--friend);cursor:pointer}
+.settings-actions{display:flex;justify-content:space-between;gap:10px}.settings-actions button{flex:1}
+.player.dead{opacity:.66}.player.unknown{opacity:.70}.pr-status{color:#e4a3a9;font-size:10px;white-space:nowrap}.pr-status.unknown{color:#e9b778}
+.pr-dot{background:var(--friend)}.pr-dot.dead{background:#697480!important;box-shadow:none!important}
+
+/* v0.7 -- Spurdo-inspired tactical team panels without borrowing art/assets */
+main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px);gap:0}
+.map-column{grid-column:2;grid-row:1;border-left:1px solid var(--line);border-right:1px solid var(--line);padding:15px 16px 14px}
+.map-wrap{background:#0a0e12;border-color:#25313b;border-radius:7px}
+.map-wrap:before{opacity:.35}
+.side-column{display:flex;flex-direction:column;min-width:0;min-height:0;background:linear-gradient(180deg,#0d131b,#080c13)}
+.side-column .side-head{padding:15px 12px 11px;border-bottom:1px solid #24303d}
+.side-column .side-top{gap:7px;flex-wrap:wrap;align-items:center}
+.side-column .eyebrow{font-size:9px;letter-spacing:.12em;color:#697e8d}
+.side-column .team-button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px;padding:10px 12px;margin-top:6px;text-align:left}
+.side-t .team-button{border-color:#82482f;background:#261a1a;color:#ffb9a0}.side-ct .team-button{border-color:#315271;background:#112135;color:#9bd3ff}
+.side-column .team-button:not(.on){opacity:.5}
+.side-column .filter{margin-top:11px;padding:9px 11px}
+.side-summary{display:flex;justify-content:space-between;flex-wrap:wrap;gap:5px;font-size:10px;color:#92a6b5;margin-top:13px}
+#bombStatus{color:#f1c276}
+.team-status{padding:12px 13px 6px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#7f92a3}
+.players{flex:1;min-height:0;overflow:auto;padding:6px 9px 20px}
+.player{position:relative;padding:0;border:1px solid #2b3b4c;border-radius:8px;background:#101720;overflow:hidden;margin-bottom:10px;transition:background .12s,border-color .12s;box-shadow:0 3px 9px #0005}
+.player:hover,.player.selected{background:#172430;border-color:#597284}
+.player.selected{box-shadow:0 0 0 1px var(--aqua) inset}
+.player.dead{opacity:.58;filter:saturate(.5)}.player.unknown{opacity:.73}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 10px 8px;border-top:2px solid var(--player-color,#70a6f0);background:linear-gradient(105deg,var(--player-soft,#142432),transparent 85%);min-height:56px}
+.card-identity{display:flex;align-items:center;gap:9px;min-width:0;flex:1}
+.card-avatar{width:40px;height:40px;flex:0 0 auto;border:1px solid #49586b;border-radius:8px;display:grid;place-items:center;font-size:19px;font-weight:850;color:#e5eef6;background:#203144}
+.side-t .card-avatar{background:#493123}.side-ct .card-avatar{background:#223d53}.player .card-avatar{background:var(--player-soft);border-color:var(--player-color);color:var(--player-color)}
+.card-name{font-size:11px;font-weight:750;max-width:125px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-role{font-size:9px;color:#a0b3c1;margin-top:5px}
+.card-health{color:#f5f8fa;font-size:17px;font-weight:800;display:flex;align-items:center;gap:4px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.card-health .heart{color:#f47983;font-size:13px}
+.card-equipment{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:9px 10px 7px;border-top:1px solid #283441;font-size:11px}
+.card-primary{font-weight:700;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#e0edf5}
+.card-bomb{flex:0 0 auto;color:#2b1910;font-size:9px;font-weight:900;letter-spacing:.03em;background:#f6be64;border:1px solid #efad43;border-radius:4px;padding:4px 5px}
+.card-bomb-inline{position:absolute;right:7px;top:7px;background:#f6c978;color:#20150d;font-weight:800;font-size:10px;border-radius:4px;padding:3px 5px}
+.card-bottom{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:7px 10px 10px;border-top:1px solid #25313b;color:#98aabb;font-size:10px}
+.card-bottom .cash{margin-left:auto;color:#bdedb2}
+.card-inventory{border-top:1px solid #273743;color:#a6bac7;font-size:10px;padding:8px 10px;line-height:1.5;display:none}
+.player.selected .card-inventory{display:block}
+.card-muted{color:#e0a9a9}
+.card-empty{padding:20px 10px;font-size:12px;color:#8093a1;text-align:center}
+.card-bomb-map{font-size:15px;font-weight:900;line-height:1;pointer-events:none}
+@media(max-width:1150px){main{grid-template-columns:minmax(170px,210px) minmax(0,1fr) minmax(170px,210px)}.map-column{padding:12px}.players{padding:5px}.card-avatar{width:33px;height:33px;font-size:14px}.card-top{padding:6px}.card-bottom{gap:5px}}
+@media(max-width:800px){body{overflow:auto}.layout{height:100dvh}.layout main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(340px,58vh) minmax(0,1fr);overflow:auto}.map-column{grid-row:1;grid-column:1/-1;min-height:340px;height:auto}.side-column{grid-row:2;min-height:230px}.side-t{grid-column:1}.side-ct{grid-column:2}.side-column .side-head{padding:10px}.players{overflow:visible}.card-avatar{display:none}.card-name{max-width:unset}}
+@media(max-width:500px){.layout main{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(515px,68vh) auto auto}.map-column{grid-column:1;grid-row:1;min-height:515px}.side-t{grid-column:1;grid-row:2}.side-ct{grid-column:1;grid-row:3}.card-avatar{display:grid}.side-column{min-height:210px}.side-column .side-head{padding:11px}.card-name{max-width:none}}
+
+.native-overlay-panel{border-top:1px solid #304252;padding-top:13px;display:flex;flex-direction:column;gap:7px}
+.native-overlay-head{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:13px}
+#overlayStatus{font-size:11px;color:#9bb5c5}
+.native-overlay-panel .settings-row{font-size:12px;padding:2px 0}
+.native-overlay-panel input[type=range]{width:85px;accent-color:#74e6c2}
+.native-overlay-panel p{font-size:11px}
+.settings-box{max-height:min(90dvh,750px);overflow-y:auto}
+@media(max-width:650px){.native-overlay-head{flex-wrap:wrap}}
+</style></head>
+<body><div class="layout">
+<header><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/></svg></div><div><div class="brand-name">CAS<span style="color:var(--aqua)">.</span>RADAR</div><div class="brand-caption">EXTERNAL <strong>READ-ONLY</strong> TELEMETRY</div></div></div><div class="pills"><div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">CONNECTING</span></div><div class="pill demo" id="demoPill" style="display:none">SIMULATION MODE</div><div class="pill"><span>PLAYERS</span><b id="playerCount">00</b></div><div class="pill mono" title="Фактическая частота отрисовки / чтения данных"><b id="fpsHud">FPS —</b><span id="sourceHud">DATA — Hz</span></div></div></header>
+<main><aside class="side-column side-t" aria-label="Террористы">
+<div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on t" id="tButton">TERRORISTS <span class="number" id="tCount">0</span></button></div><input class="filter" id="search" placeholder="Поиск по игрокам…" autocomplete="off"></div>
+<div class="team-status" id="tStatus">Состав команды · T</div><div id="tPlayers" class="players"></div>
+</aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Mirage</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="de_mirage">Mirage</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select"><option value="default">UPPER</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
+<div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar"></canvas><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
+<div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">SCROLL TO ZOOM · DRAG TO PAN · CLICK TO INSPECT</span></div></section><aside class="side-column side-ct" aria-label="Спецназ">
+<div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
+<div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
+</aside></main>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.0</span></footer></div>
+<div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
+ <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+  <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
+  <p>Цвета зависят от вашей текущей команды. Настройки сохраняются в этом браузере.</p>
+  <label class="settings-row">Союзники <input type="color" id="friendColor" value="#3b82f6"></label>
+  <label class="settings-row">Противники <input type="color" id="enemyColor" value="#ef4444"></label>
+  <label class="settings-row">Мой персонаж <input type="color" id="ownColor" value="#22c55e"></label>
+  <label class="settings-row">Показывать мёртвых <input type="checkbox" id="showDead"></label>
+  <label class="settings-row">Показывать непроверенные записи <input type="checkbox" id="showUnknown"></label>
+  <label class="settings-row">Показывать направление взгляда <input type="checkbox" id="showDirection" checked></label>
+  <div class="native-overlay-panel" id="nativeOverlayPanel">
+    <div class="native-overlay-head"><b>▣ Мини-радар Windows</b><span id="overlayStatus">Проверка…</span></div>
+    <p>Это отдельное окно Rust/Win32, не браузер. Перемещай за системный заголовок, растягивай за рамку.</p>
+    <label class="settings-row">Открыть отдельное окно <input type="checkbox" id="nativeVisible"></label>
+    <label class="settings-row">Поверх всех окон <input type="checkbox" id="nativeTop" checked></label>
+    <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
+    <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.5×</span> <input type="range" id="nativeZoom" min="0.7" max="4" step="0.1" value="1.5"></label>
+    <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
+    <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
+  </div>
+  <div class="settings-actions"><button class="small-btn" id="resetSettings">По умолчанию</button><button class="small-btn active" id="saveSettings">Готово</button></div>
+ </div>
+</div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const token=new URLSearchParams(location.search).get('token')||'';
+const api=(route)=>route+(route.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
+const radar=$('radar'),ctx=radar.getContext('2d',{alpha:true}),mapBase=$('mapBase'),baseCtx=mapBase.getContext('2d',{alpha:false}),wrap=$('mapWrap');
+let maps={},map='de_mirage',layer='default',autoMapEnabled=true,snapshot={status:'starting',players:[]},mapImg=null,showNames=false,selected=null;
+let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
+let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
+let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
+let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='';
+const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true};
+let prefs={...DEFAULT_PREFS};
+const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
+function loadPrefs(){try{const saved=JSON.parse(localStorage.getItem('cas-radar-v06-settings')||'{}');
+  for(const name of ['friend','enemy','own'])if(validHex(saved[name]))prefs[name]=saved[name];
+  for(const name of ['showDead','showUnknown','showDirection'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
+}catch(_){ }applyPrefs();}
+function applyPrefs(){for(const name of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+name,prefs[name]);
+  for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']])$(id).value=prefs[key];
+  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection']])$(id).checked=prefs[key];
+  lastListKey='';}
+function localTeam(){let t=Number(snapshot.local_team);if(t===2||t===3)return t;
+  const me=(snapshot.players||[]).find(p=>p.local);return me?.team||0;}
+function playerColor(p){if(p.local)return prefs.own;const side=localTeam();if(side===2||side===3)return p.team===side?prefs.friend:prefs.enemy;
+  return p.team===3?prefs.friend:prefs.enemy;}
+function knownLife(p){return p.life_state||((p.health_verified||p.health>0)?'alive':'unknown');}
+function playerVisible(p){const life=knownLife(p);return life==='alive'||(life==='dead'&&prefs.showDead)||(life==='unknown'&&prefs.showUnknown);}
+function angleRadians(yaw){return Math.PI/2-(Number(yaw)*Math.PI/180);} // CS2 world Y points north, screen Y points down.
+function shortestYawDelta(a,b){return ((b-a+540)%360)-180;}
+
+function safeText(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function mapData(){return maps[map]||{display_name:map,radar_info:{pos_x:0,pos_y:0,scale:5},radar_paths:[]};}
+function setNotice(text){$('notice').textContent=text||'';$('notice').classList.toggle('show',!!text);}
+function setMap(v){if(!maps[v])return;map=v;layer='default';scale=1;panX=panY=0;selected=null;mapImg=null;mapVersion++;
+  const m=mapData();$('mapName').textContent=m.display_name||map;$('mapCode').textContent=map.toUpperCase();$('mapSelect').value=map;
+  $('layerSelect').innerHTML='';const levels=m.radar_info?.verticalsections||{};
+  const possible=['default',...Object.keys(levels).filter(x=>x!=='default')];for(const l of [...new Set(possible)]){
+    const opt=document.createElement('option');opt.value=l;opt.textContent=l==='default'?'UPPER':l.toUpperCase();$('layerSelect').appendChild(opt);}
+  loadMapImage();}
+async function loadMapImage(){let key=map+'/'+layer;lastMapImageKey=key;mapImg=null;mapVersion++;
+  const m=mapData();if(!m.radar_paths?.length){setNotice('Для этой карты нет доступного изображения радара.');return;}
+  let img=new Image();img.onload=()=>{if(key===lastMapImageKey){mapImg=img;mapVersion++;if(snapshot.status==='live'||snapshot.status==='demo')setNotice('');}};
+  img.onerror=()=>{if(key===lastMapImageKey){mapImg=null;setNotice('Изображение карты недоступно. Подключите интернет или проверьте cache.');}};
+  img.src=api('/api/map-image?map='+encodeURIComponent(map)+'&layer='+encodeURIComponent(layer));}
+function transform(p){const d=mapData().radar_info||{};const k=Number(d.scale)||5;const x=Number(d.pos_x)||0,y=Number(d.pos_y)||0;
+  // Original Valve overview calibration uses a canonical 1024x1024 radar coordinate grid.
+  // Some overview files have rotate=1; the same Valve world-to-radar convention applies.
+  return {x:(p[0]-x)/(k*1024),y:(y-p[1])/(k*1024)};}
+function xy(p){let q=transform(p);let side=baseSide*scale;return {x:rect.width/2-side/2+panX+q.x*side,y:rect.height/2-side/2+panY+q.y*side};}
+function inLayer(p){const d=mapData().radar_info?.verticalsections;if(!d||!d[layer])return true;let a=d[layer];
+return p[2]>=Number(a.AltitudeMin??-1e9)&&p[2]<=Number(a.AltitudeMax??1e9);}
+function shown(){return (snapshot.players||[]).filter(p=>playerVisible(p)&&(p.team===2?t:p.team===3?ct:false));}
+function fit(){const b=wrap.getBoundingClientRect();rect.width=b.width;rect.height=b.height;
+ const dpr=Math.min(devicePixelRatio||1,1.5);
+ for(const el of [radar,mapBase]){el.width=Math.max(1,Math.floor(rect.width*dpr));el.height=Math.max(1,Math.floor(rect.height*dpr));}
+ ctx.setTransform(dpr,0,0,dpr,0,0);baseCtx.setTransform(dpr,0,0,dpr,0,0);
+ baseSide=Math.min(rect.width,rect.height)*.91;baseCacheKey='';}
+function renderBackground(){
+ const w=rect.width,h=rect.height,size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
+ const key=[w,h,scale,panX,panY,mapVersion,layer].join('|');if(key===baseCacheKey)return;
+ baseCacheKey=key;baseCtx.fillStyle='#0b171c';baseCtx.fillRect(0,0,w,h);
+ baseCtx.save();baseCtx.beginPath();baseCtx.rect(0,0,w,h);baseCtx.clip();
+ baseCtx.fillStyle='#0b171c';baseCtx.fillRect(left,top,size,size);
+ if(mapImg){baseCtx.globalAlpha=.9;baseCtx.drawImage(mapImg,left,top,size,size);baseCtx.globalAlpha=1;}
+ else{baseCtx.strokeStyle='#24404b';baseCtx.lineWidth=1;for(let i=0;i<=16;i++){let z=size*i/16;baseCtx.beginPath();baseCtx.moveTo(left+z,top);baseCtx.lineTo(left+z,top+size);baseCtx.moveTo(left,top+z);baseCtx.lineTo(left+size,top+z);baseCtx.stroke();}}
+ baseCtx.strokeStyle='#48616b';baseCtx.lineWidth=1;baseCtx.strokeRect(left,top,size,size);baseCtx.restore();}
+function blend(a,b,t){return a.map((v,i)=>v+(b[i]-v)*t);}
+function smoothedPosition(p,now){const m=motions.get(p.id);if(!m)return p.position;
+ const t=Math.max(0,Math.min(1,(now-m.at)/motionMs));return blend(m.from,m.to,t);}
+function acceptSnapshot(data){
+ const now=performance.now();const changed=lastSampleId!==data.time;
+ if(changed){motionMs=Math.min(180,Math.max(65,now-lastSampleAt||120));
+   const next=new Map();for(const p of data.players||[]){
+     const old=motions.get(p.id),from=old?smoothedPosition(p,now):p.position;
+     let oldAngle=(old&&Number.isFinite(old.toYaw))?old.toYaw:null;
+     const nextAngle=Number.isFinite(p.yaw)?p.yaw:null;
+     let fromAngle=(old&&Number.isFinite(old.fromYaw)&&Number.isFinite(old.toYaw))?
+       old.fromYaw+shortestYawDelta(old.fromYaw,old.toYaw)*Math.max(0,Math.min(1,(now-old.at)/motionMs)):oldAngle;
+     if(!Number.isFinite(fromAngle))fromAngle=nextAngle;
+     next.set(p.id,{from,to:p.position,at:now,fromYaw:fromAngle,toYaw:nextAngle});
+   }motions=next;lastSampleAt=now;lastSampleId=data.time;
+ }
+ snapshot=data;
+ if(autoMapEnabled && data.game_map && maps[data.game_map] && map!==data.game_map){
+   setMap(data.game_map);
+ }
+ $('autoMapBtn').title=autoMapEnabled
+   ? 'AUTO включено: '+(data.game_map||'ожидание карты')+' / '+(data.game_map_source||'нет сигнала')
+   : 'AUTO отключено: нажмите, чтобы синхронизировать с CS2';
+}
+function smoothedYaw(p,now){const m=motions.get(p.id);if(!m||!Number.isFinite(m.toYaw)||!Number.isFinite(m.fromYaw))return p.yaw;
+ return m.fromYaw+shortestYawDelta(m.fromYaw,m.toYaw)*Math.max(0,Math.min(1,(now-m.at)/motionMs));}
+function smoothShown(now){return shown().filter(p=>p.position).map(p=>({...p,position:smoothedPosition(p,now),yaw:smoothedYaw(p,now)}));}
+function draw(now){requestAnimationFrame(draw);
+ if(now-lastDraw<16)return;
+ lastDraw=now;fpsFrames++;
+ if(now-fpsBegin>=1000){$('fpsHud').textContent='FPS '+Math.round(fpsFrames*1000/(now-fpsBegin));fpsFrames=0;fpsBegin=now;}
+ renderBackground();
+ const w=rect.width,h=rect.height;ctx.clearRect(0,0,w,h);
+ const size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
+ ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
+ const people=smoothShown(now).filter(p=>inLayer(p.position));
+ for(const p of people){let xy0=xy(p.position);if(xy0.x<left-30||xy0.x>left+size+30||xy0.y<top-30||xy0.y>top+size+30)continue;
+    const color=playerColor(p),life=knownLife(p),chosen=selected===p.id,highlight=hovered===p.id;
+    ctx.save();ctx.translate(xy0.x,xy0.y);
+    if(life==='dead'){
+      // A corpse has no meaningful facing direction; keep its confirmed position.
+      ctx.globalAlpha=.60;ctx.fillStyle='#1a2630';ctx.strokeStyle=color;ctx.lineWidth=1.7;
+      ctx.beginPath();ctx.arc(0,0,9,0,Math.PI*2);ctx.fill();ctx.stroke();
+      ctx.beginPath();ctx.moveTo(-4.5,-4.5);ctx.lineTo(4.5,4.5);ctx.moveTo(4.5,-4.5);ctx.lineTo(-4.5,4.5);ctx.stroke();
+    }else if(life==='unknown'){
+      ctx.strokeStyle=color;ctx.globalAlpha=.65;ctx.setLineDash([3,3]);ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(0,0,9,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle=color;ctx.font='bold 10px Segoe UI';ctx.textAlign='center';ctx.fillText('?',0,3);
+    }else{
+      if(prefs.showDirection&&Number.isFinite(p.yaw)){
+        ctx.rotate(angleRadians(p.yaw));
+        ctx.fillStyle=color+'23';ctx.beginPath();ctx.moveTo(0,-(chosen?30:23));ctx.lineTo(-13,10);ctx.lineTo(13,10);ctx.closePath();ctx.fill();
+        ctx.fillStyle=color;ctx.strokeStyle='#09141b';ctx.lineWidth=3;
+        ctx.beginPath();ctx.moveTo(0,-(p.local?13:11));ctx.lineTo(-9,9);ctx.lineTo(0,5);ctx.lineTo(9,9);ctx.closePath();ctx.stroke();ctx.fill();
+      }else{ctx.beginPath();ctx.arc(0,0,8,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
+    }
+    ctx.restore();
+    if(isCarrier(p)){ctx.fillStyle='#f7c478';ctx.strokeStyle='#30200c';ctx.lineWidth=3;
+      ctx.font='900 16px Segoe UI,Arial';ctx.textAlign='center';
+      const c4Label=p.c4_source==='recent'?'C4?':'C4';ctx.strokeText(c4Label,xy0.x,xy0.y-20);ctx.fillText(c4Label,xy0.x,xy0.y-20);}
+    if(chosen||highlight){ctx.beginPath();ctx.arc(xy0.x,xy0.y,17,0,Math.PI*2);ctx.strokeStyle=color;ctx.lineWidth=1.2;ctx.stroke();}
+    if(showNames||chosen){ctx.font='600 11px Segoe UI,Arial';const text=String(p.name||'Player').slice(0,24);const tw=ctx.measureText(text).width;
+      let bx=xy0.x-tw/2-6,by=xy0.y+15;ctx.fillStyle='#071015da';ctx.fillRect(bx,by,tw+12,19);ctx.fillStyle='#eaf8f8';ctx.textAlign='center';ctx.fillText(text,xy0.x,by+13);}
+ }
+ ctx.restore();}
+
+function visiblePlayers(){let s=$('search').value.toLowerCase().trim();return shown().filter(p=>(p.name||'').toLowerCase().includes(s));}
+function isCarrier(p){return snapshot.bomb_carrier_id!=null&&Number(snapshot.bomb_carrier_id)===Number(p.id)&&p.team===2&&knownLife(p)==='alive'&&p.has_c4===true;}
+function playerCard(p){
+ const life=knownLife(p),color=playerColor(p),hp=(life==='dead'?'0':p.health==null?'?':Number(p.health));
+ const inventory=Array.isArray(p.inventory)?p.inventory:[];
+ const equip=inventory.filter(v=>v!==p.weapon).slice(0,8).join(' · ');
+ const role=p.local?'ВЫ':life==='dead'?'ПОГИБ':life==='unknown'?'НЕПОДТВЕРЖДЁН':'ИГРОК';
+ const bomb=isCarrier(p);
+ const pistols=new Set(['Glock-18','USP-S','P2000','P250','Desert Eagle','CZ75-Auto','Five-SeveN','Tec-9','R8 Revolver','Dual Berettas']);
+ const secondary=inventory.find(v=>pistols.has(v)&&v!==p.weapon);
+ const grenadeIcons={'Flashbang':'FLASH','HE Grenade':'HE','Smoke':'SMOKE','Molotov':'FIRE','Incendiary':'FIRE','Decoy':'DECOY'};
+ const grenades=inventory.filter(v=>grenadeIcons[v]).slice(0,4).map(v=>`<span title="${safeText(v)}">${grenadeIcons[v]}</span>`).join('');
+ return `<div class="player ${life} ${p.id===selected?'selected':''}" data-id="${Number(p.id)}" style="--player-color:${color};--player-soft:${color}20" title="Нажми для выделения на карте">
+ <div class="card-top"><div class="card-identity"><div class="card-avatar" aria-hidden="true">${p.team===2?'T':'CT'}</div><div style="min-width:0"><div class="card-name" title="${safeText(p.name)}">${safeText(p.name)}${p.local?' ★':''}</div><div class="card-role">${role}</div></div></div><div class="card-health"><span class="heart">♥</span>${hp}</div></div>
+ <div class="card-equipment"><span class="card-primary">${safeText(p.weapon||'—')}${secondary?' · '+safeText(secondary):''}</span>${bomb?`<span class="card-bomb" title="${p.c4_source==='recent'?'Владелец по последним подтверждённым данным':'Носитель C4 подтверждён'}">▣ ${p.c4_source==='recent'?'C4?':'C4'}</span>`:''}</div>
+ <div class="card-bottom"><span title="Броня">◈ ${p.armor==null?'—':Number(p.armor)||0}</span>${p.helmet?'<span title="Шлем">⛨</span>':''}${p.defuser?'<span title="Набор сапёра">KIT</span>':''}${grenades||'<span title="Данные о гранатах отсутствуют">—</span>'}<span class="cash">${p.money==null?'$—':'$ '+(Number(p.money)||0).toLocaleString('ru-RU')}</span></div>
+ <div class="card-inventory">${equip?safeText(equip):'Дополнительные предметы не обнаружены'}</div></div>`;
+}
+function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
+ const listKey=JSON.stringify([selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_carrier_source,
+   list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory])]);
+ if(listKey===lastListKey)return;lastListKey=listKey;
+ $('playerCount').textContent=String(all.filter(playerVisible).length).padStart(2,'0');
+ $('totalCount').textContent=all.filter(p=>knownLife(p)==='alive').length+' ALIVE · '+all.filter(p=>knownLife(p)==='dead').length+' DEAD';
+ for(const [id,side] of [['ctButton',3],['tButton',2]]){let color=playerColor({team:side,local:false});$(id).style.borderColor=color;$(id).style.backgroundColor=color+'20';$(id).style.color=color;}
+ $('ctCount').textContent=all.filter(p=>p.team===3).length;$('tCount').textContent=all.filter(p=>p.team===2).length;
+ $('tStatus').textContent=localTeam()===2?'ВАША КОМАНДА':'TERRORISTS';
+ $('ctStatus').textContent=localTeam()===3?'ВАША КОМАНДА':'COUNTER-TERRORISTS';
+ const carrier=all.find(isCarrier);
+ $('bombStatus').textContent=carrier?'▣ '+(carrier.c4_source==='recent'?'C4?':'C4')+' · '+(carrier.name||'Player'):'C4 · носитель не подтверждён';
+ for(const [team,id] of [[2,'tPlayers'],[3,'ctPlayers']]){
+   let parent=$(id),scroll=parent.scrollTop;
+   parent.innerHTML=list.filter(p=>p.team===team).sort((a,b)=>Number(b.local)-Number(a.local))
+     .map(playerCard).join('')||'<div class="card-empty">Нет доступных игроков</div>';
+   parent.scrollTop=scroll;
+ }
+}
+function diagnosis(){
+ const d=snapshot.diagnostics||{};
+ const summary=['Контроллеры: '+(d.controller_entries??'?'),
+   'команды: '+(d.valid_teams??'?'),'pawn: '+(d.resolved_pawns??'?'),
+   'живые: '+(d.alive_pawns??'?'),'координаты: '+(d.position_reads??'?')].join(' · ');
+ return (snapshot.message||'Нет корректных данных игроков')+'\n'+summary+
+   (d.offsets_match_game===false?'\n⚠ Версия CS2 и версия выгруженных офсетов различаются.':'')+
+   '\nНажми DIAG, чтобы скопировать подробную диагностику.';
+}
+function updateStatus(){
+ const v=snapshot.status, live=v==='live', partial=v==='partial', demo=v==='demo', empty=v==='no_players';
+ $('statusDot').className='dot '+(live||demo?'live':partial||empty?'warning':v==='error'?'error':'');
+ $('statusText').textContent=live?'LIVE / '+(snapshot.players||[]).length+' PLAYERS':
+   partial?'PARTIAL / '+(snapshot.players||[]).length+' UNVERIFIED':demo?'DEMO / ACTIVE':empty?'NO PLAYER DATA':v==='waiting'?'WAITING FOR CS2':
+   v==='error'?'READER ERROR':'CONNECTING';
+ $('demoPill').style.display=demo?'flex':'none';
+ $('diagBtn').style.display='inline-block';
+ $('sourceHud').textContent='DATA '+(snapshot.source_hz??'—')+' Hz';
+ $('liveInd').style.color=live||demo?'#78f5d2':'#ffb566';
+ $('footerText').textContent=live?'PROCESS '+snapshot.pid+' · '+(snapshot.players||[]).length+' PLAYERS':
+   partial?'POSSIBLE PLAYERS · HP UNVERIFIED':demo?'DEMO DATA · NOT CONNECTED TO GAME':empty?'GAME OPEN · ENTITY READ FAILED':
+   v==='error'?'READER ERROR':'WAITING FOR GAME';
+ if(empty){setNotice(diagnosis());}
+ else if(partial){setNotice((snapshot.message||'Не все данные игроков подтверждены.')+' Нажми DIAG.');}
+ else if(v==='error'||v==='waiting'){
+   setNotice((snapshot.message||'Ожидание данных CS2')+'\nПроверьте консоль приложения.');
+ }else if(live&&snapshot.message){setNotice(snapshot.message+' Нажми DIAG для подробностей.');}
+ else if((live||demo)&&mapImg){setNotice('');}
+}
+
+async function poll(){try{const r=await fetch(api('/api/state'),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);acceptSnapshot(await r.json());updateStatus();repaintPlayers();}
+catch(e){$('statusText').textContent='DISCONNECTED';$('statusDot').className='dot error';setNotice('Соединение с CAS Radar потеряно: '+e.message);}setTimeout(poll,75);}
+async function init(){loadPrefs();fit();window.addEventListener('resize',fit);try{const r=await fetch(api('/api/maps'));if(!r.ok)throw Error('Map list HTTP '+r.status);maps=(await r.json()).maps||{};
+  let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale&&maps[k].radar_paths?.length).sort();$('mapSelect').innerHTML=keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
+  let saved=null;try{saved=localStorage.getItem('cas-map');}catch(_){}
+  setMap(maps[saved]?saved:maps['de_mirage']?'de_mirage':keys[0]);
+}catch(e){setNotice('Не удалось получить список карт: '+e.message);}poll();requestAnimationFrame(draw);}
+$('mapSelect').addEventListener('change',e=>{autoMapEnabled=false;$('autoMapBtn').classList.remove('active');setMap(e.target.value);try{localStorage.setItem('cas-map',map);}catch(_){}});
+$('autoMapBtn').addEventListener('click',()=>{autoMapEnabled=!autoMapEnabled;$('autoMapBtn').classList.toggle('active',autoMapEnabled);if(autoMapEnabled && snapshot.game_map && maps[snapshot.game_map])setMap(snapshot.game_map);});
+$('layerSelect').addEventListener('change',e=>{layer=e.target.value;loadMapImage();});
+$('namesBtn').addEventListener('click',()=>{showNames=!showNames;$('namesBtn').classList.toggle('active',showNames);});
+$('settingsBtn').addEventListener('click',()=>{openSettings();});
+$('miniBtn').addEventListener('click',()=>{openSettings();$('nativeVisible').focus();});
+async function openSettings(){
+  $('settingsBackdrop').hidden=false;
+  await updateNativeSettings();
+}
+let nativeAvailable=false;
+async function updateNativeSettings(){try {
+ const res=await fetch(api('/api/overlay'),{cache:'no-store'});
+ if(!res.ok)throw Error('HTTP '+res.status);
+ const d=await res.json();nativeAvailable=Boolean(d.supported);
+ $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
+ for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter']]) $(id).checked=Boolean(d.settings?.[field]);
+ $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
+ $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
+ $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
+ $('miniBtn').classList.toggle('active',Boolean(d.settings?.visible));
+ if(nativeAvailable && ['friend','enemy','own'].some(k=>d.settings?.[k+'_color']!==prefs[k])){
+   nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});
+ }
+}catch(e){nativeAvailable=false;$('overlayStatus').textContent='Ошибка: '+e.message;}}
+let nativePending=Promise.resolve();
+function nativeChange(fields){
+ if(!nativeAvailable)return;
+ nativePending=nativePending.then(async()=>{
+   const res=await fetch(api('/api/overlay'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)});
+   const d=await res.json();if(!res.ok)throw Error(d.error||'HTTP '+res.status);
+   $('overlayStatus').textContent=!d.window_ready?'Ожидание запуска окна…':(d.settings.visible?'Окно открыто':'Окно закрыто');
+   $('miniBtn').classList.toggle('active',d.settings.visible);
+ }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
+}
+for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter']])
+ $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
+$('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
+$('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
+$('nativeOpacity').addEventListener('input',e=>{$('nativeOpacityLabel').textContent=e.target.value+'%';});
+$('nativeOpacity').addEventListener('change',e=>nativeChange({opacity:Number(e.target.value)}));
+
+function closeSettings(){$('settingsBackdrop').hidden=true;}
+$('closeSettings').addEventListener('click',closeSettings);
+$('saveSettings').addEventListener('click',closeSettings);
+$('settingsBackdrop').addEventListener('click',e=>{if(e.target===$('settingsBackdrop'))closeSettings();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSettings();});
+for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']]){
+  $(id).addEventListener('input',e=>{if(validHex(e.target.value)){prefs[key]=e.target.value;applyPrefs();
+    try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
+    if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});}});
+}
+for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection']]){
+  $(id).addEventListener('change',e=>{prefs[key]=e.target.checked;applyPrefs();
+    try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
+}
+$('resetSettings').addEventListener('click',()=>{prefs={...DEFAULT_PREFS};applyPrefs();
+  try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
+
+$('diagBtn').addEventListener('click',async()=>{
+  const d={status:snapshot.status,message:snapshot.message,game_map:snapshot.game_map,game_map_source:snapshot.game_map_source,diagnostics:snapshot.diagnostics};
+  const txt=JSON.stringify(d,null,2);
+  try{await navigator.clipboard.writeText(txt);$('diagBtn').textContent='COPIED';setTimeout(()=>$('diagBtn').textContent='DIAG',1800);}
+  catch(e){window.prompt('Скопируй диагностику:',txt);}
+});
+$('ctButton').addEventListener('click',()=>{ct=!ct;$('ctButton').classList.toggle('on',ct);repaintPlayers();});
+$('tButton').addEventListener('click',()=>{t=!t;$('tButton').classList.toggle('on',t);repaintPlayers();});
+$('search').addEventListener('input',repaintPlayers);
+for(const id of ['tPlayers','ctPlayers'])$(id).addEventListener('click',e=>{let row=e.target.closest('.player');if(!row)return;selected=Number(row.dataset.id);repaintPlayers();});
+$('zoomIn').addEventListener('click',()=>{scale=Math.min(4,scale*1.2);});$('zoomOut').addEventListener('click',()=>{scale=Math.max(.6,scale/1.2);});
+$('resetView').addEventListener('click',()=>{scale=1;panX=panY=0;});
+radar.addEventListener('wheel',e=>{e.preventDefault();let old=scale,newScale=Math.min(4,Math.max(.6,scale*(e.deltaY<0?1.14:1/1.14)));let b=radar.getBoundingClientRect(),mx=e.clientX-b.left-rect.width/2,my=e.clientY-b.top-rect.height/2;
+ panX=(panX-mx)*(newScale/old)+mx;panY=(panY-my)*(newScale/old)+my;scale=newScale;},{passive:false});
+radar.addEventListener('pointerdown',e=>{pointerStart={x:e.clientX,y:e.clientY,panX,panY};dragging=true;radar.classList.add('dragging');radar.setPointerCapture(e.pointerId);});
+radar.addEventListener('pointermove',e=>{if(dragging&&pointerStart){panX=pointerStart.panX+e.clientX-pointerStart.x;panY=pointerStart.panY+e.clientY-pointerStart.y;}else{
+let b=radar.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;let c=shown().map(p=>({p,q:xy(p.position)})).find(v=>Math.hypot(x-v.q.x,y-v.q.y)<16);hovered=c?c.p.id:null;radar.style.cursor=c?'pointer':'grab';}});
+radar.addEventListener('pointerup',e=>{if(pointerStart&&Math.hypot(e.clientX-pointerStart.x,e.clientY-pointerStart.y)<5){let b=radar.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;let c=shown().filter(p=>inLayer(p.position)).map(p=>({p,q:xy(p.position)})).find(v=>Math.hypot(x-v.q.x,y-v.q.y)<20);if(c){selected=c.p.id;repaintPlayers();}}dragging=false;pointerStart=null;radar.classList.remove('dragging');});
+init();
+</script></body></html>

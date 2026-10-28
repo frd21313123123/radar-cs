@@ -1,0 +1,86 @@
+name: Windows x64 — build and publish EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Test and build Windows executable
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable for Windows MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Print tool versions
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+      - name: Test source
+        run: cargo test --target x86_64-pc-windows-msvc --all-targets
+      - name: Build release EXE
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Package ready-to-run release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/x86_64-pc-windows-msvc/release/cas-external-radar.exe'
+          if (-not (Test-Path $exe)) { throw "Expected EXE not found: $exe" }
+          New-Item -ItemType Directory -Force -Path 'dist/web' | Out-Null
+          Copy-Item $exe 'dist/cas-external-radar.exe'
+          Copy-Item 'web/index.html' 'dist/web/index.html'
+          Copy-Item 'README.md','LICENSE','start_windows.bat' 'dist/'
+          Compress-Archive -Path 'dist/*' -DestinationPath 'CAS-Radar-Windows-x64.zip' -Force
+          $sha = (Get-FileHash 'dist/cas-external-radar.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "${sha}  cas-external-radar.exe" | Set-Content -Encoding ascii 'cas-external-radar.exe.sha256'
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CAS-Radar-Windows-x64
+          path: |
+            dist/cas-external-radar.exe
+            CAS-Radar-Windows-x64.zip
+            cas-external-radar.exe.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish to GitHub Releases
+    needs: windows-x64
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: CAS-Radar-Windows-x64
+          path: release_assets
+      - name: Create release with EXE and ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('build-{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ github.ref_type == 'tag' && format('CAS Radar {0}', github.ref_name) || format('CAS Radar Windows x64 - build {0}', github.run_number) }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release_assets/dist/cas-external-radar.exe
+            release_assets/CAS-Radar-Windows-x64.zip
+            release_assets/cas-external-radar.exe.sha256
