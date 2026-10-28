@@ -1,7 +1,7 @@
 use crate::model::{Snapshot,GrenadeView};
 use std::{collections::HashMap,time::{Duration,Instant}};
 #[derive(Default)]pub struct GrenadeTracker{tracks:HashMap<u32,Trail>,map:String,pid:u32}
-struct Trail{kind:String,points:Vec<[f32;3]>,last:Instant,active_at:Option<Instant>}
+struct Trail{kind:String,points:Vec<[f32;3]>,last:Instant,active_at:Option<Instant>,position:[f32;3],timer_deadline:Option<Instant>,timer_estimated:bool}
 impl GrenadeTracker{
  pub fn reset(&mut self){self.tracks.clear();self.map.clear();self.pid=0;}
  pub fn update(&mut self,s:&mut Snapshot,now:Instant,map:&str){
@@ -10,9 +10,9 @@ impl GrenadeTracker{
   if !s.grenades_read{return;}
   for g in &mut s.grenades{
    if g.state=="flying"{
-    let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None});
+    let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None,position:g.position,timer_deadline:None,timer_estimated:false});
     let far=t.points.last().is_some_and(|p|distance(*p,g.position)>1600.);
-    if t.kind!=g.kind||far{t.kind=g.kind.clone();t.points.clear();t.active_at=None;}
+    if t.kind!=g.kind||far||t.active_at.is_some(){t.kind=g.kind.clone();t.points.clear();t.active_at=None;t.timer_deadline=None;}
     if g.trajectory.len()>=2 {
       // Merge with sampled positions instead of replacing existing tracks
       // with a shorter/broken game history after every update.
@@ -25,13 +25,30 @@ impl GrenadeTracker{
     }
     if t.points.last().is_none_or(|p|distance(*p,g.position)>3.){t.points.push(g.position);}
     if t.points.len()>40{t.points.drain(0..t.points.len()-40);}
-    t.last=now;g.trajectory=t.points.clone();
-   }else if let Some(t)=self.tracks.get_mut(&g.id){
-    if t.kind==g.kind{
-      let start=*t.active_at.get_or_insert(now);
-      if now.saturating_duration_since(start)<Duration::from_millis(1200){g.trajectory=t.points.clone();}
-      t.last=now;
+    t.last=now;t.position=g.position;g.trajectory=t.points.clone();
+   }else if g.state=="active"{
+    let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None,position:g.position,timer_deadline:None,timer_estimated:false});
+    if t.kind!=g.kind || distance(t.position,g.position)>1600. {
+      t.kind=g.kind.clone();t.points.clear();t.active_at=None;t.timer_deadline=None;
     }
+    let start=*t.active_at.get_or_insert(now);
+    let age=now.saturating_duration_since(start);
+    if age<Duration::from_millis(1200){g.trajectory=t.points.clone();}
+    if matches!(g.kind.as_str(),"smoke"|"molotov") {
+      if let Some(left)=g.remaining_secs.filter(|v|v.is_finite()&&(0.0..=60.0).contains(v)) {
+        t.timer_deadline=Some(now+Duration::from_secs_f32(left));t.timer_estimated=g.timer_estimated;
+      }else if t.timer_deadline.is_none(){
+        let lifetime=if g.kind=="smoke"{20.}else{7.};
+        t.timer_deadline=Some(start+Duration::from_secs_f32(lifetime));
+        // The effect may already have been active when first observed.
+        t.timer_estimated=true;
+      }
+      if let Some(end)=t.timer_deadline {
+        g.remaining_secs=Some(end.saturating_duration_since(now).as_secs_f32());
+        g.timer_estimated=t.timer_estimated;
+      }
+    }
+    t.last=now;t.position=g.position;
    }
   }
   let ids:std::collections::HashSet<u32>=s.grenades.iter().map(|v|v.id).collect();
@@ -39,15 +56,38 @@ impl GrenadeTracker{
   for (&id,t) in self.tracks.iter(){
    if !ids.contains(&id) && t.points.len()>1 && now.saturating_duration_since(t.last)<Duration::from_millis(700){
     s.grenades.push(GrenadeView{id,kind:t.kind.clone(),state:"finished".into(),
-      position:*t.points.last().unwrap(),radius_units:0.,trajectory:t.points.clone(),fire_cells:vec![]});
+      position:*t.points.last().unwrap(),radius_units:0.,trajectory:t.points.clone(),fire_cells:vec![],remaining_secs:None,timer_estimated:false});
    }
   }
-  self.tracks.retain(|id,t|ids.contains(id)||now.saturating_duration_since(t.last)<Duration::from_millis(700));
+  // Retain activation clocks across transient missing reads; never restart
+  // an estimated countdown simply because an entity was absent for a scan.
+  self.tracks.retain(|id,t|ids.contains(id)||now.saturating_duration_since(t.last)<
+    if t.active_at.is_some(){Duration::from_secs(25)}else{Duration::from_millis(700)});
  }
 }
 fn distance(a:[f32;3],b:[f32;3])->f32{((a[0]-b[0]).powi(2)+(a[1]-b[1]).powi(2)+(a[2]-b[2]).powi(2)).sqrt()}
 #[cfg(test)]mod tests{
  use super::*;use crate::model::demo_snapshot;
+ #[test]fn estimated_timer_survives_disappearance_without_restarting(){
+  let mut t=GrenadeTracker::default();let at=Instant::now();let mut s=demo_snapshot(0.);
+  s.grenades.retain(|g|g.kind=="smoke"&&g.state=="active");
+  s.grenades[0].remaining_secs=None;t.update(&mut s,at,"de_mirage");
+  assert_eq!(s.grenades[0].remaining_secs,Some(20.));assert!(s.grenades[0].timer_estimated);
+  let grenade=s.grenades[0].clone();s.grenades.clear();
+  t.update(&mut s,at+Duration::from_secs(2),"de_mirage");
+  s.grenades=vec![grenade];s.grenades[0].remaining_secs=None;
+  t.update(&mut s,at+Duration::from_secs(5),"de_mirage");
+  assert_eq!(s.grenades[0].remaining_secs,Some(15.));
+ }
+ #[test]fn missing_clock_preserves_last_authoritative_expiry(){
+  let mut t=GrenadeTracker::default();let at=Instant::now();let mut s=demo_snapshot(0.);
+  s.grenades.retain(|g|g.kind=="molotov");
+  s.grenades[0].remaining_secs=Some(2.);t.update(&mut s,at,"de_mirage");
+  s.grenades[0].remaining_secs=None;t.update(&mut s,at+Duration::from_secs(1),"de_mirage");
+  assert_eq!(s.grenades[0].remaining_secs,Some(1.));assert!(!s.grenades[0].timer_estimated);
+  s.grenades[0].remaining_secs=None;t.update(&mut s,at+Duration::from_secs(3),"de_mirage");
+  assert_eq!(s.grenades[0].remaining_secs,Some(0.));
+ }
  #[test]fn follows_observed_position(){
   let mut t=GrenadeTracker::default();let start=Instant::now();let mut s=demo_snapshot(0.);s.grenades_read=true;
   let i=s.grenades.iter().position(|g|g.state=="flying").unwrap();s.grenades[i].trajectory.clear();

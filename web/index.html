@@ -114,6 +114,34 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 .bomb-fields b{color:#46d3f3;font-weight:750}
 .bomb-time-number{font-weight:800;font-size:23px;color:#e8f9ff}
 @media(max-width:650px){.bomb-countdown{top:63px;left:7px;transform:scale(.87);transform-origin:top left}}
+
+/* Readable tactical telemetry: shape, text and colour carry the same signal. */
+:focus-visible{outline:2px solid #9cf4d7;outline-offset:3px}
+.small-btn,.radar-tool,.team-button{min-width:28px;min-height:28px}
+.player{cursor:pointer;border-radius:12px;margin-bottom:12px}
+.card-top{padding:11px 10px;min-height:66px}
+.card-avatar{position:relative;width:45px;height:49px;overflow:hidden;border-radius:9px;background:#162330!important}
+.card-avatar>svg{width:30px;height:36px;color:#bdcddd}
+.card-avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 20%;background:#14212c}
+.card-name{font-size:12px;max-width:145px;color:#f0f6fa}
+.card-role{font-size:10px;letter-spacing:.03em;color:#b7c7d3}
+.card-health{font-size:18px}.card-health small{font-size:9px;color:#a9bdcc}
+.card-hp-track{height:3px;background:#293540}.card-hp-fill{height:100%;background:#80ddb3}
+.card-equipment{padding:9px 10px;gap:6px;flex-wrap:wrap}
+.card-primary{display:flex;align-items:center;gap:7px;font-size:11px;min-width:0}
+.card-primary img{width:47px;height:22px;object-fit:contain}
+.card-inventory{display:flex!important;align-items:center;flex-wrap:wrap;gap:5px;padding:8px 9px;background:#0c141d;line-height:1.2}
+.equip-chip{display:inline-flex;align-items:center;gap:4px;min-height:27px;padding:3px 5px;border:1px solid #334654;border-radius:5px;color:#d4e4ee;background:#16232e;font-size:9px;max-width:100%}
+.equip-chip.active{border-color:#8ab3ca;background:#233b49;color:#fff}
+.equip-chip img{width:31px;height:17px;object-fit:contain;flex:none}
+.equip-chip.utility img{width:19px}.equip-chip.utility{padding:3px 4px}
+.card-bottom{color:#bdcdd7;gap:7px;padding:8px 10px}
+.card-bottom .equip-chip{background:transparent;border:0;padding:0;min-height:19px;font-size:10px}
+.card-bottom .cash{font-size:11px}.flash-status{color:#fff;font-weight:800}
+.telemetry-key{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:#c1d1db;margin-top:7px;line-height:1.5}
+.telemetry-key b{font-size:12px;color:#f3f8fb}.legend{height:auto;min-height:50px;padding-top:8px;padding-bottom:8px}
+@media(max-width:1150px){.card-name{max-width:115px}.card-avatar{width:35px;height:42px}.card-health{font-size:15px}.card-primary img{width:37px}}
+@media(max-width:800px){.player .card-avatar{display:grid}.telemetry-key{gap:6px 10px}.card-name{max-width:none}.legend .hint{display:none}}
 </style></head>
 <body><div class="layout">
 <header><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/></svg></div><div><div class="brand-name">CAS<span style="color:var(--aqua)">.</span>RADAR</div><div class="brand-caption">EXTERNAL <strong>READ-ONLY</strong> TELEMETRY</div></div></div><div class="pills"><div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">CONNECTING</span></div><div class="pill demo" id="demoPill" style="display:none">SIMULATION MODE</div><div class="pill"><span>PLAYERS</span><b id="playerCount">00</b></div><div class="pill mono" title="Фактическая частота отрисовки / чтения данных"><b id="fpsHud">FPS —</b><span id="sourceHud">DATA — Hz</span></div></div></header>
@@ -121,7 +149,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on t" id="tButton">TERRORISTS <span class="number" id="tCount">0</span></button></div><input class="filter" id="search" placeholder="Поиск по игрокам…" autocomplete="off"></div>
 <div class="team-status" id="tStatus">Состав команды · T</div><div id="tPlayers" class="players"></div>
 </aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Mirage</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="de_mirage">Mirage</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select"><option value="default">UPPER</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
-<div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar"></canvas>
+<div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar" role="img" aria-label="Карта игроков: ХП, оружие, стрелки высоты и белый крест ослепления. Данные каждого игрока доступны в карточках по сторонам."></canvas>
 <div class="bomb-countdown" id="bombTimerPanel" hidden aria-label="Время до взрыва C4">
   <div class="bomb-ring"><svg viewBox="0 0 48 48" aria-hidden="true">
     <circle class="track" cx="24" cy="24" r="20"></circle>
@@ -130,7 +158,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   <div class="bomb-fields"><div>Плэнт: <b id="bombTimerSite">?</b></div>
     <div class="bomb-time-number"><span id="bombTimerSecs">—</span><small style="font-size:12px"> сек</small></div></div>
 </div><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
-<div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">SCROLL TO ZOOM · DRAG TO PAN · CLICK TO INSPECT</span></div></section><aside class="side-column side-ct" aria-label="Спецназ">
+<div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">КОЛЕСО — МАСШТАБ · ПЕРЕТАСКИВАНИЕ — КАРТА</span><div class="telemetry-key"><span><b>↑ / ↓</b> выше / ниже вас</span><span><b>ХП</b> здоровье</span><span><b>⤨</b> белый крест — ослеплён</span><span><b>~</b> таймер по наблюдению</span></div></div></section><aside class="side-column side-ct" aria-label="Спецназ">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
@@ -153,7 +181,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   <label class="settings-row">Пунктирный путь гранат <input type="checkbox" id="showPaths" checked></label>
   <div class="native-overlay-panel" id="nativeOverlayPanel">
     <div class="native-overlay-head"><b>▣ Мини-радар Windows</b><span id="overlayStatus">Проверка…</span></div>
-    <p>Это отдельное окно Rust/Win32, не браузер. Перемещай за системный заголовок, растягивай за рамку.</p>
+    <p>Это отдельное окно Rust/Win32, не браузер. Без системной рамки. Перемещайте за верхнюю полосу, меняйте размер за края. Крестик внутри окна закрывает мини-карту.</p>
     <label class="settings-row">Открыть отдельное окно <input type="checkbox" id="nativeVisible"></label>
     <label class="settings-row">Поверх всех окон <input type="checkbox" id="nativeTop" checked></label>
     <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
@@ -165,7 +193,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
     <label class="settings-row">Смоки в миникарте <input type="checkbox" id="nativeSmokes" checked></label>
     <label class="settings-row">Молотовы в миникарте <input type="checkbox" id="nativeFire" checked></label>
     <label class="settings-row">Пунктир гранат в миникарте <input type="checkbox" id="nativePaths" checked></label>
-    <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.5×</span> <input type="range" id="nativeZoom" min="0.7" max="4" step="0.1" value="1.5"></label>
+    <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.0×</span> <input type="range" id="nativeZoom" min="0.35" max="4" step="0.05" value="1"></label>
     <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
     <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
   </div>
@@ -183,7 +211,7 @@ let maps={},map='de_mirage',layer='default',autoMapEnabled=true,snapshot={status
 let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
-let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='';
+let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='',snapshotReceivedAt=0;
 const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true};
 let prefs={...DEFAULT_PREFS};
 const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
@@ -205,6 +233,52 @@ function angleRadians(yaw){return Math.PI/2-(Number(yaw)*Math.PI/180);} // CS2 w
 function shortestYawDelta(a,b){return ((b-a+540)%360)-180;}
 
 function safeText(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+const weaponImages=new Map();
+function weaponImage(weapon){
+ const key=String(weapon||'—');if(!weaponImages.has(key)){const img=new Image();img.src=api('/api/weapon-icon?weapon='+encodeURIComponent(key));weaponImages.set(key,img);}return weaponImages.get(key);
+}
+function referencePosition(){
+ const me=(snapshot.players||[]).find(p=>p.local&&knownLife(p)==='alive');
+ if(me?.position)return me.position;
+ const observed=snapshot.observer_view;
+ return observed&&[4,5].includes(observed.mode)&&Array.isArray(observed.position)?observed.position:null;
+}
+function relativeHeight(position,reference){
+ if(!Array.isArray(position)||!Array.isArray(reference)||!Number.isFinite(position[2])||!Number.isFinite(reference[2]))return 0;
+ const dz=position[2]-reference[2];return dz>64?1:dz< -64?-1:0;
+}
+function snapshotAge(now=performance.now()){return Math.max(0,(now-snapshotReceivedAt)/1000);}
+function remainingEffect(effect,now=performance.now()){
+ return Number.isFinite(effect?.remaining_secs)?Math.max(0,effect.remaining_secs-snapshotAge(now)):null;
+}
+function isFlashed(p,now=performance.now()){return typeof p.is_flashed==='boolean'?p.is_flashed:Number.isFinite(p.flash_remaining_secs)&&p.flash_remaining_secs>snapshotAge(now);}
+function drawFlashCross(x,y){
+ ctx.save();ctx.strokeStyle='#0b141e';ctx.lineWidth=5;ctx.lineCap='round';
+ const stroke=()=>{ctx.beginPath();for(const [a,b] of [[-1,-1],[1,-1]]){const c=-a,d=-b;ctx.moveTo(x+a*9,y+b*9);ctx.lineTo(x+c*9,y+d*9);ctx.moveTo(x+c*9-c*5,y+d*9);ctx.lineTo(x+c*9,y+d*9);ctx.lineTo(x+c*9,y+d*9-d*5);}ctx.stroke();};
+ stroke();ctx.strokeStyle='#ffffff';ctx.lineWidth=2;stroke();ctx.restore();
+}
+function drawPlayerTelemetry(p,point,now,reference){
+ if(knownLife(p)!=='alive')return;
+ const {x,y}=point,health=Number.isFinite(p.health)?Math.max(0,p.health):null;
+ ctx.save();ctx.textAlign='center';ctx.textBaseline='middle';
+ const height=!p.local&&p.team!==localTeam()?relativeHeight(p.position,reference):0;
+ if(height){ctx.strokeStyle='#08111a';ctx.lineWidth=4;ctx.fillStyle='#f6faff';ctx.font='900 20px Segoe UI,Arial';const arrow=height>0?'↑':'↓';ctx.strokeText(arrow,x+21,y);ctx.fillText(arrow,x+21,y);}
+ if(isFlashed(p,now))drawFlashCross(x,y);
+ ctx.fillStyle='#0a1520ee';ctx.fillRect(x-23,y+15,46,17);
+ ctx.font='800 11px Segoe UI,Arial';ctx.fillStyle=health===null?'#d4e1e9':health<=25?'#ff9d9d':'#effaf5';ctx.fillText(health===null?'? ХП':health+' ХП',x,y+23);
+ if(health!==null){ctx.fillStyle='#34434b';ctx.fillRect(x-21,y+31,42,2);ctx.fillStyle=health<=25?'#ff8181':'#84e5b6';ctx.fillRect(x-21,y+31,42*Math.min(health,100)/100,2);}
+ const img=weaponImage(p.weapon);
+ ctx.fillStyle='#0a1520dc';ctx.fillRect(x-22,y+36,44,19);
+ if(img.complete&&img.naturalWidth>0)ctx.drawImage(img,x-20,y+37,40,16);
+ else{ctx.fillStyle='#dae6ed';ctx.font='700 8px Segoe UI,Arial';ctx.fillText(String(p.weapon||'—').slice(0,10),x,y+46);}
+ ctx.restore();
+}
+function equipmentIcon(name,extraClass=''){
+ const text=String(name||'—'),label=({'Armor':'Броня','Helmet':'Шлем','Defuse Kit':'Набор сапёра','Flashbang':'Флеш','HE Grenade':'HE','Smoke':'Смок','Molotov':'Молотов','Incendiary':'Зажигательная','Decoy':'Декой'}[text]||text);const utility=/Flashbang|Grenade|Smoke|Molotov|Incendiary|Decoy|C4/.test(text);
+ return `<span class="equip-chip ${utility?'utility ':''}${extraClass}" title="${safeText(text)}"><img loading="lazy" src="${safeText(api('/api/weapon-icon?weapon='+encodeURIComponent(text)))}" alt=""><span>${safeText(label)}</span></span>`;
+}
+
 function mapData(){return maps[map]||{display_name:map,radar_info:{pos_x:0,pos_y:0,scale:5},radar_paths:[]};}
 function setNotice(text){$('notice').textContent=text||'';$('notice').classList.toggle('show',!!text);}
 function setMap(v){if(!maps[v])return;map=v;layer='default';scale=1;panX=panY=0;selected=null;mapImg=null;mapVersion++;
@@ -256,7 +330,7 @@ function acceptSnapshot(data){
      next.set(p.id,{from,to:p.position,at:now,fromYaw:fromAngle,toYaw:nextAngle});
    }motions=next;lastSampleAt=now;lastSampleId=data.time;
  }
- snapshot=data;
+ snapshot=data;if(changed)snapshotReceivedAt=now;
  if(autoMapEnabled && data.game_map && maps[data.game_map] && map!==data.game_map){
    setMap(data.game_map);
  }
@@ -295,7 +369,7 @@ function draw(now){requestAnimationFrame(draw);
  const w=rect.width,h=rect.height;ctx.clearRect(0,0,w,h);
  const size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
  ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
- const people=smoothShown(now).filter(p=>inLayer(p.position));
+ const people=smoothShown(now),reference=referencePosition();
  if(prefs.showNoise && snapshot.noise && Number.isFinite(snapshot.noise.radius_units)){
    const me=people.find(p=>p.local&&knownLife(p)==='alive');
    const units=Number(mapData().radar_info?.scale);
@@ -351,6 +425,13 @@ function draw(now){requestAnimationFrame(draw);
          }
        }
      }
+     const remaining=remainingEffect(g,now);
+     if(remaining!==null&&remaining>0){
+       const text=(g.timer_estimated?'~':'')+remaining.toFixed(1)+'с';
+       ctx.save();ctx.font='800 13px Segoe UI,Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+       const tw=ctx.measureText(text).width;ctx.fillStyle='#0a1520f2';ctx.fillRect(p.x-tw/2-7,p.y-12,tw+14,24);
+       ctx.strokeStyle=color;ctx.lineWidth=1;ctx.strokeRect(p.x-tw/2-7,p.y-12,tw+14,24);ctx.fillStyle='#f6faff';ctx.fillText(text,p.x,p.y);ctx.restore();
+     }
    }else if(g.state==='flying'&&prefs.showPaths){
      ctx.save();ctx.fillStyle=color;ctx.strokeStyle='#111a21';ctx.lineWidth=2;ctx.beginPath();
      ctx.arc(p.x,p.y,6,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
@@ -373,7 +454,7 @@ function draw(now){requestAnimationFrame(draw);
     }
     ctx.restore();
  }
- for(const p of people){let xy0=xy(p.position);if(xy0.x<left-30||xy0.x>left+size+30||xy0.y<top-30||xy0.y>top+size+30)continue;
+ for(const p of people){let xy0=xy(p.position);if(xy0.x< -40||xy0.x>w+40||xy0.y< -60||xy0.y>h+60)continue;
     const color=playerColor(p),life=knownLife(p),chosen=selected===p.id,highlight=hovered===p.id;
     ctx.save();ctx.translate(xy0.x,xy0.y);
     if(life==='dead'){
@@ -394,36 +475,37 @@ function draw(now){requestAnimationFrame(draw);
       }else{ctx.beginPath();ctx.arc(0,0,8,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
     }
     ctx.restore();
+    drawPlayerTelemetry(p,xy0,now,reference);
     if(isCarrier(p)){ctx.fillStyle='#f7c478';ctx.strokeStyle='#30200c';ctx.lineWidth=3;
       ctx.font='900 16px Segoe UI,Arial';ctx.textAlign='center';
       const c4Label=p.c4_source==='recent'?'C4?':'C4';ctx.strokeText(c4Label,xy0.x,xy0.y-20);ctx.fillText(c4Label,xy0.x,xy0.y-20);}
     if(chosen||highlight){ctx.beginPath();ctx.arc(xy0.x,xy0.y,17,0,Math.PI*2);ctx.strokeStyle=color;ctx.lineWidth=1.2;ctx.stroke();}
     if(showNames||chosen){ctx.font='600 11px Segoe UI,Arial';const text=String(p.name||'Player').slice(0,24);const tw=ctx.measureText(text).width;
-      let bx=xy0.x-tw/2-6,by=xy0.y+15;ctx.fillStyle='#071015da';ctx.fillRect(bx,by,tw+12,19);ctx.fillStyle='#eaf8f8';ctx.textAlign='center';ctx.fillText(text,xy0.x,by+13);}
+      let bx=xy0.x-tw/2-6,by=xy0.y-(isCarrier(p)?58:40);ctx.fillStyle='#071015da';ctx.fillRect(bx,by,tw+12,19);ctx.fillStyle='#eaf8f8';ctx.textAlign='center';ctx.fillText(text,xy0.x,by+13);}
  }
  ctx.restore();}
 
 function visiblePlayers(){let s=$('search').value.toLowerCase().trim();return shown().filter(p=>(p.name||'').toLowerCase().includes(s));}
 function isCarrier(p){return snapshot.bomb_carrier_id!=null&&Number(snapshot.bomb_carrier_id)===Number(p.id)&&p.team===2&&knownLife(p)==='alive'&&p.has_c4===true;}
 function playerCard(p){
- const life=knownLife(p),color=playerColor(p),hp=(life==='dead'?'0':p.health==null?'?':Number(p.health));
+ const life=knownLife(p),color=playerColor(p),hp=life==='dead'?0:Number.isFinite(p.health)?Math.max(0,p.health):null;
  const inventory=Array.isArray(p.inventory)?p.inventory:[];
- const equip=inventory.filter(v=>v!==p.weapon).slice(0,8).join(' · ');
- const role=p.local?'ВЫ':life==='dead'?'ПОГИБ':life==='unknown'?'НЕПОДТВЕРЖДЁН':'ИГРОК';
- const bomb=isCarrier(p);
- const pistols=new Set(['Glock-18','USP-S','P2000','P250','Desert Eagle','CZ75-Auto','Five-SeveN','Tec-9','R8 Revolver','Dual Berettas']);
- const secondary=inventory.find(v=>pistols.has(v)&&v!==p.weapon);
- const grenadeIcons={'Flashbang':'FLASH','HE Grenade':'HE','Smoke':'SMOKE','Molotov':'FIRE','Incendiary':'FIRE','Decoy':'DECOY'};
- const grenades=inventory.filter(v=>grenadeIcons[v]).slice(0,4).map(v=>`<span title="${safeText(v)}">${grenadeIcons[v]}</span>`).join('');
- return `<div class="player ${life} ${p.id===selected?'selected':''}" data-id="${Number(p.id)}" style="--player-color:${color};--player-soft:${color}20" title="Нажми для выделения на карте">
- <div class="card-top"><div class="card-identity"><div class="card-avatar" aria-hidden="true">${p.team===2?'T':'CT'}</div><div style="min-width:0"><div class="card-name" title="${safeText(p.name)}">${safeText(p.name)}${p.local?' ★':''}</div><div class="card-role">${role}</div></div></div><div class="card-health"><span class="heart">♥</span>${hp}</div></div>
- <div class="card-equipment"><span class="card-primary">${safeText(p.weapon||'—')}${secondary?' · '+safeText(secondary):''}</span>${bomb?`<span class="card-bomb" title="${p.c4_source==='recent'?'Владелец по последним подтверждённым данным':'Носитель C4 подтверждён'}">▣ ${p.c4_source==='recent'?'C4?':'C4'}</span>`:''}</div>
- <div class="card-bottom"><span title="Броня">◈ ${p.armor==null?'—':Number(p.armor)||0}</span>${p.helmet?'<span title="Шлем">⛨</span>':''}${p.defuser?'<span title="Набор сапёра">KIT</span>':''}${grenades||'<span title="Данные о гранатах отсутствуют">—</span>'}<span class="cash">${p.money==null?'$—':'$ '+(Number(p.money)||0).toLocaleString('ru-RU')}</span></div>
- <div class="card-inventory">${equip?safeText(equip):'Дополнительные предметы не обнаружены'}</div></div>`;
+ const role=p.local?'Вы':life==='dead'?'Погиб':life==='unknown'?'Состояние неизвестно':'В игре';
+ const bomb=isCarrier(p),flashed=isFlashed(p);
+ const height=p.team!==localTeam()?relativeHeight(p.position,referencePosition()):0;
+ const model=typeof p.agent_model==='string'?p.agent_model:'';
+ const silhouette='<svg viewBox="0 0 32 40" aria-hidden="true" fill="currentColor"><circle cx="16" cy="11" r="7"/><path d="M3 36v-6c0-9 26-9 26 0v6z"/></svg>';
+ const avatar=`<div class="card-avatar" title="${safeText(model?'Скин персонажа: '+model:'Модель персонажа недоступна')}">${silhouette}${model?`<img loading="lazy" class="agent-portrait" src="${safeText(api('/api/agent-icon?model='+encodeURIComponent(model)))}" alt="Скин персонажа">`:''}</div>`;
+ return `<div class="player ${life} ${p.id===selected?'selected':''}" role="button" tabindex="0" aria-pressed="${p.id===selected}" aria-label="${safeText(p.name)}, ${hp??'неизвестно'} ХП, ${safeText(p.weapon||'оружие неизвестно')}${flashed?', ослеплён':''}${height>0?', выше вас':height<0?', ниже вас':''}" data-id="${Number(p.id)}" style="--player-color:${color};--player-soft:${color}20" title="Выделить игрока на карте">
+ <div class="card-top"><div class="card-identity">${avatar}<div style="min-width:0"><div class="card-name" title="${safeText(p.name)}">${safeText(p.name)}${p.local?' ★':''}</div><div class="card-role">${role}${height?` · ${height>0?'↑ выше':'↓ ниже'}`:''}${flashed?' · <span class="flash-status">Ослеплён</span>':''}</div></div></div><div class="card-health"><span class="heart" aria-hidden="true">♥</span>${hp??'?'}<small>ХП</small></div></div>
+ <div class="card-hp-track"><div class="card-hp-fill" style="width:${Math.min(hp??0,100)}%;background:${hp!==null&&hp<=25?'#ff8181':'#80ddb3'}"></div></div>
+ <div class="card-equipment"><span class="card-primary"><img src="${safeText(api('/api/weapon-icon?weapon='+encodeURIComponent(p.weapon||'—')))}" alt="">${safeText(p.weapon||'Оружие неизвестно')}</span>${bomb?`<span class="card-bomb" title="${p.c4_source==='recent'?'Последний подтверждённый владелец':'Подтверждённый носитель C4'}">▣ ${p.c4_source==='recent'?'C4?':'C4'}</span>`:''}</div>
+ <div class="card-inventory" aria-label="Полный инвентарь">${inventory.length?inventory.map(v=>equipmentIcon(v,v===p.weapon?'active':'')).join(''):'<span class="card-muted">Инвентарь не получен</span>'}</div>
+ <div class="card-bottom">${equipmentIcon('Armor')}<span title="Количество брони">${p.armor==null?'?':Number(p.armor)||0}</span>${p.helmet?equipmentIcon('Helmet'):''}${p.defuser?equipmentIcon('Defuse Kit'):''}<span class="cash">${p.money==null?'$ —':'$ '+(Number(p.money)||0).toLocaleString('ru-RU')}</span></div></div>`;
 }
 function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
  const listKey=JSON.stringify([selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_world,snapshot.bomb_carrier_source,
-   list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory])]);
+   list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory,p.agent_model,isFlashed(p),relativeHeight(p.position,referencePosition())])]);
  if(listKey===lastListKey)return;lastListKey=listKey;
  $('playerCount').textContent=String(all.filter(playerVisible).length).padStart(2,'0');
  $('totalCount').textContent=all.filter(p=>knownLife(p)==='alive').length+' ALIVE · '+all.filter(p=>knownLife(p)==='dead').length+' DEAD';
@@ -499,7 +581,7 @@ async function updateNativeSettings(){try {
  const d=await res.json();nativeAvailable=Boolean(d.supported);
  $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
  for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']]) $(id).checked=Boolean(d.settings?.[field]);
- $('nativeZoom').value=d.settings?.zoom??1.5;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(1)+'×';
+ $('nativeZoom').value=d.settings?.zoom??1;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(2).replace(/0$/,'')+'×';
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
  $('miniBtn').classList.toggle('active',Boolean(d.settings?.visible));
@@ -519,7 +601,7 @@ function nativeChange(fields){
 }
 for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']])
  $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
-$('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(1)+'×';});
+$('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(2).replace(/0$/,'')+'×';});
 $('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
 $('nativeOpacity').addEventListener('input',e=>{$('nativeOpacityLabel').textContent=e.target.value+'%';});
 $('nativeOpacity').addEventListener('change',e=>nativeChange({opacity:Number(e.target.value)}));
@@ -550,7 +632,12 @@ $('diagBtn').addEventListener('click',async()=>{
 $('ctButton').addEventListener('click',()=>{ct=!ct;$('ctButton').classList.toggle('on',ct);repaintPlayers();});
 $('tButton').addEventListener('click',()=>{t=!t;$('tButton').classList.toggle('on',t);repaintPlayers();});
 $('search').addEventListener('input',repaintPlayers);
-for(const id of ['tPlayers','ctPlayers'])$(id).addEventListener('click',e=>{let row=e.target.closest('.player');if(!row)return;selected=Number(row.dataset.id);repaintPlayers();});
+for(const id of ['tPlayers','ctPlayers']){
+ const selectRow=e=>{const row=e.target.closest('.player');if(!row)return;selected=Number(row.dataset.id);repaintPlayers();};
+ $(id).addEventListener('click',selectRow);
+ $(id).addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();const id=e.target.closest('.player')?.dataset.id;selectRow(e);document.querySelector(`.player[data-id="${Number(id)}"]`)?.focus();}});
+}
+document.addEventListener('error',e=>{if(e.target?.classList?.contains('agent-portrait'))e.target.hidden=true;},true);
 $('zoomIn').addEventListener('click',()=>{scale=Math.min(4,scale*1.2);});$('zoomOut').addEventListener('click',()=>{scale=Math.max(.6,scale/1.2);});
 $('resetView').addEventListener('click',()=>{scale=1;panX=panY=0;});
 radar.addEventListener('wheel',e=>{e.preventDefault();let old=scale,newScale=Math.min(4,Math.max(.6,scale*(e.deltaY<0?1.14:1/1.14)));let b=radar.getBoundingClientRect(),mx=e.clientX-b.left-rect.width/2,my=e.clientY-b.top-rect.height/2;
@@ -558,6 +645,6 @@ radar.addEventListener('wheel',e=>{e.preventDefault();let old=scale,newScale=Mat
 radar.addEventListener('pointerdown',e=>{pointerStart={x:e.clientX,y:e.clientY,panX,panY};dragging=true;radar.classList.add('dragging');radar.setPointerCapture(e.pointerId);});
 radar.addEventListener('pointermove',e=>{if(dragging&&pointerStart){panX=pointerStart.panX+e.clientX-pointerStart.x;panY=pointerStart.panY+e.clientY-pointerStart.y;}else{
 let b=radar.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;let c=shown().map(p=>({p,q:xy(p.position)})).find(v=>Math.hypot(x-v.q.x,y-v.q.y)<16);hovered=c?c.p.id:null;radar.style.cursor=c?'pointer':'grab';}});
-radar.addEventListener('pointerup',e=>{if(pointerStart&&Math.hypot(e.clientX-pointerStart.x,e.clientY-pointerStart.y)<5){let b=radar.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;let c=shown().filter(p=>inLayer(p.position)).map(p=>({p,q:xy(p.position)})).find(v=>Math.hypot(x-v.q.x,y-v.q.y)<20);if(c){selected=c.p.id;repaintPlayers();}}dragging=false;pointerStart=null;radar.classList.remove('dragging');});
+radar.addEventListener('pointerup',e=>{if(pointerStart&&Math.hypot(e.clientX-pointerStart.x,e.clientY-pointerStart.y)<5){let b=radar.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;let c=shown().map(p=>({p,q:xy(p.position)})).find(v=>Math.hypot(x-v.q.x,y-v.q.y)<20);if(c){selected=c.p.id;repaintPlayers();}}dragging=false;pointerStart=null;radar.classList.remove('dragging');});
 init();
 </script></body></html>

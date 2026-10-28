@@ -10,3 +10,4 @@ pub mod schema;
 pub mod server;
 pub mod state;
 pub mod tracker;
+pub mod icons;

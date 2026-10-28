@@ -1,7 +1,7 @@
 //! Minimal bounded local HTTP server; requests carry a random bearer token.
 use std::{io::{Read,Write},net::{TcpListener,TcpStream,SocketAddr},path::PathBuf,sync::{Arc,Mutex},time::Duration};
 use serde_json::{Value,json};
-use crate::{assets,gsi,state::SharedState,overlay::OverlayController};
+use crate::{assets,icons,gsi,state::SharedState,overlay::OverlayController};
 
 pub struct HttpServer {
     pub bind:String,pub port:u16,pub token:String,pub gsi_token:String,
@@ -28,6 +28,20 @@ fn respond(stream:&mut TcpStream,status:u16,body:&[u8],ctype:&str)->std::io::Res
 }
 fn reply_json(stream:&mut TcpStream,status:u16,v:Value)->std::io::Result<()>{let bytes=v.to_string();respond(stream,status,bytes.as_bytes(),"application/json; charset=utf-8")}
 fn query_arg<'a>(query:&'a str,name:&str)->Option<&'a str>{query.split('&').filter_map(|arg|arg.split_once('=')).find(|(k,_)|*k==name).map(|(_,v)|v)}
+
+// Decode a bounded UTF-8 query value, rejecting malformed escapes.
+fn query_value(query:&str,name:&str)->Option<String>{
+    let raw=query_arg(query,name)?;
+    if raw.len()>768{return None;}
+    let mut bytes=Vec::new();let mut input=raw.bytes();
+    while let Some(b)=input.next(){
+        bytes.push(match b{
+            b'%' => {let hi=(input.next()? as char).to_digit(16)?;let lo=(input.next()? as char).to_digit(16)?;(hi*16+lo) as u8},
+            b'+' => b' ',_=>b,
+        });
+    }
+    String::from_utf8(bytes).ok()
+}
 
 fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
     let peer:SocketAddr=stream.peer_addr()?;
@@ -105,6 +119,17 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             let snap=server.state.lock().map(|s|s.snapshot()).map_err(|_|std::io::Error::other("poisoned state"))?;
             reply_json(&mut stream,200,serde_json::to_value(snap).unwrap_or(json!({"status":"error"})))
         }
+        "/api/weapon-icon"=>{
+            let name=query_value(query,"weapon").unwrap_or_default();
+            respond(&mut stream,200,icons::weapon_icon(&name).as_bytes(),"image/svg+xml")
+        }
+        "/api/agent-icon"=>{
+            let model=query_value(query,"model").unwrap_or_default();
+            match icons::agent_icon(&model,&server.cache,server.offline){
+                Some(bytes)=>respond(&mut stream,200,&bytes,"image/png"),
+                None=>respond(&mut stream,200,icons::NEUTRAL_AGENT.as_bytes(),"image/svg+xml"),
+            }
+        }
         "/api/overlay"=>reply_json(&mut stream,200,server.overlay.status()),
         "/api/bomb-icon"=>respond(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png"),
         "/api/maps"=>{
@@ -132,5 +157,12 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
         assert!(!html.contains("bombTimerHp"));
     }
     #[test]fn bomb_png_embedded(){assert!(include_bytes!("../assets/bomb_ground.png").starts_with(b"\x89PNG\r\n\x1a\n"));}
+    #[test]fn decode_icon_query(){
+        assert_eq!(query_value("weapon=AK-47","weapon").as_deref(),Some("AK-47"));
+        assert_eq!(query_value("weapon=HE%20Grenade","weapon").as_deref(),Some("HE Grenade"));
+        assert_eq!(query_value("weapon=M4A1%2DS","weapon").as_deref(),Some("M4A1-S"));
+        assert_eq!(query_value("weapon=%GG","weapon"),None);
+        assert_eq!(query_value("weapon=%","weapon"),None);
+    }
     #[test]fn auth_query(){assert_eq!(query_arg("map=de_nuke&token=hello","token"),Some("hello"));assert_eq!(query_arg("token=bad","token"),Some("bad"));}
 }

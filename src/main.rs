@@ -69,9 +69,14 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                     for p in &mut snap.players{if let Some(cached)=cache_details.get(&p.id){
                         p.money=cached.money;p.armor=cached.armor;p.helmet=cached.helmet;p.defuser=cached.defuser;
                         p.weapon=cached.weapon.clone();p.inventory=cached.inventory.clone();p.has_c4=cached.has_c4;
+                        p.agent_model=cached.agent_model.clone();
                     }}
                 }
-                if !grenade_scan{snap.grenades=cache_grenades.clone();}
+                if !grenade_scan{
+                    snap.grenades=cache_grenades.clone();
+                    let elapsed=last_grenade_scan.elapsed().as_secs_f32();
+                    for g in &mut snap.grenades {if let Some(left)=g.remaining_secs.as_mut(){*left=(*left-elapsed).max(0.);}}
+                }
                 let map=state.lock().map(|s|s.current_map().to_owned()).unwrap_or_default();
                 tracker.update(&mut snap,Instant::now(),&map);
                 grenade_tracker.update(&mut snap,Instant::now(),&map);

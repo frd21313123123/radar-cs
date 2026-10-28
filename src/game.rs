@@ -2,7 +2,7 @@
 use crate::model::{BombWorld, BombTimer, Diagnostics, GrenadeView, ObserverView, Player, Snapshot, LocalMotion, life_state, normalized_yaw, unique_bomb_carrier, now_secs, normalize_map_name};
 use crate::process::Memory;
 use crate::schema::Schema;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{collections::{HashMap,HashSet,BTreeMap},time::{Instant,Duration}};
 
 fn weapon_name(id:u16)->String {
@@ -24,6 +24,16 @@ fn try_f32<M:Memory>(p:&mut M,addr:u64)->Option<f32>{
 }
 fn opt_u64<M:Memory>(p:&mut M,ptr:u64,offset:Option<u64>)->u64{if ptr>0{offset.map_or(0,|o|p.u64(ptr+o))}else{0}}
 fn opt_i32<M:Memory>(p:&mut M,ptr:u64,offset:Option<u64>)->Option<i32>{if ptr>0{offset.and_then(|o|try_i32(p,ptr+o))}else{None}}
+
+/// CS2 simulation ticks are 64 Hz; use the replicated effect start,
+/// not wall time since the radar happened to first discover the entity.
+fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Option<f32>{
+    let tick=begin_tick?;let current=current?;
+    if tick<=0 || !current.is_finite() || !(1.0..=60.0).contains(&lifetime){return None;}
+    let elapsed=current-tick as f32/64.;
+    if !(-0.1..=lifetime+0.5).contains(&elapsed){return None;}
+    Some((lifetime-elapsed).clamp(0.,lifetime))
+}
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
@@ -96,9 +106,11 @@ impl CS2Reader {
         let (active_id,active_name)=self.item(p,active).unwrap_or((0,"—".into()));
         let mut inventory=Vec::new();
         let vec_off=match self.schema.field("CPlayer_WeaponServices","m_hMyWeapons"){Some(o)=>o,None=>return(active_name,inventory,if active_id==49{Some(true)}else{None})};
-        let vec=match p.read(ptr+vec_off,12){Some(v)=>v,None=>return(active_name.clone(),if active_id!=0{vec![active_name.clone()]}else{vec![]},if active_id==49{Some(true)}else{None})};
-        let data_ptr=u64::from_le_bytes(vec[..8].try_into().unwrap());
-        let count=u32::from_le_bytes(vec[8..12].try_into().unwrap()) as usize;
+        let vec=match p.read(ptr+vec_off,16){Some(v)=>v,None=>return(active_name.clone(),if active_id!=0{vec![active_name.clone()]}else{vec![]},if active_id==49{Some(true)}else{None})};
+        // m_hMyWeapons is C_NetworkUtlVectorBase: size, padding, data pointer.
+        // Reading it as pointer/size hides holstered C4 from the inventory.
+        let count=u32::from_le_bytes(vec[..4].try_into().unwrap()) as usize;
+        let data_ptr=u64::from_le_bytes(vec[8..16].try_into().unwrap());
         if count>64||(count>0&&data_ptr==0){return(active_name,vec![],if active_id==49{Some(true)}else{None});}
         let handles=if count==0 {Some(vec![])} else {p.read(data_ptr,count*4)};
         let mut complete=count>0;
@@ -109,12 +121,37 @@ impl CS2Reader {
                 let h=u32::from_le_bytes(raw[4*i..4*i+4].try_into().unwrap());
                 if h==0||h==u32::MAX ||h&0x7fff==0{complete=false;continue;}
                 let w=self.entity(p,list,h&0x7fff);
-                if let Some((id,name))=self.item(p,w){if id==49{has_c4=true;}if !inventory.contains(&name){inventory.push(name);}}
+                if let Some((id,name))=self.item(p,w){if id==49{has_c4=true;}inventory.push(name);}
                 else{complete=false;}
             }}
         }
         if active_id>0&&!inventory.contains(&active_name){inventory.push(active_name.clone());}
         (active_name,inventory,if has_c4{Some(true)}else if complete{Some(false)}else{None})
+    }
+
+    fn game_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
+        let globals=p.u64(base+self.schema.offset("dwGlobalVars")?);
+        if globals<0x10000{return None;}
+        try_f32(p,globals+0x30).filter(|v|*v>=0.)
+    }
+    fn flash_state<M:Memory>(&self,p:&mut M,pawn:u64)->Option<bool>{
+        // Overlay alpha is the current effect, whereas FlashDuration can
+        // outlive the visible effect and is not a reliable expiry timestamp.
+        self.schema.field("C_CSPlayerPawnBase","m_flFlashOverlayAlpha")
+            .and_then(|off|try_f32(p,pawn+off))
+            .filter(|alpha|(0.0..=255.0).contains(alpha)).map(|alpha|alpha>1.)
+    }
+    fn agent_model<M:Memory>(&self,p:&mut M,node:u64)->Option<String>{
+        if node<0x10000{return None;}
+        let state=self.schema.field("CSkeletonInstance","m_modelState")?;
+        let name=self.schema.field("CModelState","m_ModelName")?;
+        let name_ptr=p.u64(node+state+name);
+        if name_ptr<0x10000{return None;}
+        let value=p.cstr(name_ptr,192).replace('\\',"/");
+        if value.len()<8 || value.len()>180 || !(value.ends_with(".vmdl")||value.ends_with(".vmdl_c"))
+            || !value.bytes().all(|b|b.is_ascii_alphanumeric()||b"/_-.".contains(&b))
+            || value.split('/').any(|part|part=="..") {return None;}
+        Some(value)
     }
 
     /// Use Source 2 game-time rather than "40 seconds since detected".
@@ -152,10 +189,14 @@ impl CS2Reader {
             let ptr=p.u64(base+offset);
             if ptr!=0 && seen.insert(ptr){candidates.push(ptr);}
         }
-        let highest=self.schema.offset("dwGameEntitySystem_highestEntityIndex")
-            .map(|offset|p.i32(list+offset))
-            .filter(|idx|(64..=8191).contains(idx))
-            .unwrap_or(2048).min(4095) as u32;
+        // The high-water mark belongs to dwGameEntitySystem, which need not
+        // equal the entity-list root. C4 can occupy slots above 4095.
+        let system=self.schema.offset("dwGameEntitySystem").map(|off|p.u64(base+off));
+        let highest=system.filter(|ptr|*ptr>=0x10000).and_then(|system|
+            self.schema.offset("dwGameEntitySystem_highestEntityIndex")
+                .and_then(|offset|try_i32(p,system+offset)))
+            .filter(|idx|(64..0x8000).contains(idx))
+            .unwrap_or(8191) as u32;
         let stride=self.layout.stride;
         for chunk in 0..=((highest as usize)>>9) {
             let block=self.block(p,list,(chunk*512) as u32);
@@ -214,7 +255,9 @@ impl CS2Reader {
             }
             // A stale owner handle is common while a dropped weapon is
             // changing state. Explicit GameRules.m_bBombDropped wins.
-            let is_dropped=game_dropped==Some(1) || valid_owner.is_none();
+            // A failed owner read is unknown, not an invalid/empty handle.
+            // Otherwise a transient read failure hides a confirmed carrier.
+            let is_dropped=game_dropped==Some(1) || (owner.is_some() && valid_owner.is_none());
             if !is_dropped {continue;}
             ownerless=true;
             if dropped.is_some(){continue;}
@@ -274,15 +317,17 @@ impl CS2Reader {
             if a.iter().all(|x|x.is_finite()&&x.abs()<100000.){Some(a)}else{None}
         }).collect()
     }
-    fn scan_grenades<M:Memory>(&mut self,p:&mut M,list:u64,diag:&mut Diagnostics)->Vec<GrenadeView>{
+    fn scan_grenades<M:Memory>(&mut self,p:&mut M,list:u64,base:u64,current_time:Option<f32>,diag:&mut Diagnostics)->Vec<GrenadeView>{
         let ident_off=self.schema.field("CEntityInstance","m_pEntity").unwrap_or(0x10);
         // The identity type is from entity2.dll (not client.dll schema JSON).
         let scene_off=match self.schema.field("C_BaseEntity","m_pGameSceneNode"){Some(v)=>v,None=>return vec![]};
         let origin_off=match self.schema.field("CGameSceneNode","m_vecAbsOrigin"){Some(v)=>v,None=>return vec![]};
-        let highest=self.schema.offset("dwGameEntitySystem_highestEntityIndex")
-            .map(|off|p.i32(list+off))
-            .filter(|n|(64..=8191).contains(n))
-            .unwrap_or(2048).min(4095) as usize;
+        let system=self.schema.offset("dwGameEntitySystem").map(|off|p.u64(base+off));
+        let highest=system.filter(|ptr|*ptr>=0x10000).and_then(|system|
+            self.schema.offset("dwGameEntitySystem_highestEntityIndex")
+                .and_then(|offset|try_i32(p,system+offset)))
+            .filter(|idx|(64..0x8000).contains(idx))
+            .unwrap_or(8191) as usize;
         let mut out=Vec::new();let stride=self.layout.stride;
         for chunk in 0..=(highest>>9){
             let block=self.block(p,list,(chunk*512) as u32);
@@ -327,8 +372,12 @@ impl CS2Reader {
                         let center=[cells.iter().map(|p|p[0]).sum::<f32>()/n,
                             cells.iter().map(|p|p[1]).sum::<f32>()/n,cells.iter().map(|p|p[2]).sum::<f32>()/n];
                         let radius=cells.iter().map(|p|((p[0]-center[0]).powi(2)+(p[1]-center[1]).powi(2)).sqrt()).fold(0f32,f32::max)+38.;
+                        let begin=self.schema.field("C_Inferno","m_nFireEffectTickBegin").and_then(|off|try_i32(p,ptr+off));
+                        let lifetime=self.schema.field("C_Inferno","m_nFireLifetime").and_then(|off|try_f32(p,ptr+off));
+                        let remaining_secs=effect_remaining(begin,current_time,lifetime.unwrap_or(7.));
                         out.push(GrenadeView{id:index,kind:"molotov".into(),state:"active".into(),
-                            position:center,radius_units:radius.clamp(45.,250.),trajectory:vec![],fire_cells:cells});
+                            position:center,radius_units:radius.clamp(45.,250.),trajectory:vec![],fire_cells:cells,
+                            remaining_secs,timer_estimated:lifetime.is_none()});
                     }else{
                         let active=kind=="smoke" && self.schema.field("C_SmokeGrenadeProjectile","m_bDidSmokeEffect")
                             .and_then(|o|p.read(ptr+o,1)).is_some_and(|v|v[0]==1);
@@ -347,8 +396,12 @@ impl CS2Reader {
                                 if (from[0]-pos[0]).hypot(from[1]-pos[1])>20.0{points.extend([from,pos]);}
                             }
                         }
+                        let begin=if active {self.schema.field("C_SmokeGrenadeProjectile","m_nSmokeEffectTickBegin")
+                            .and_then(|off|try_i32(p,ptr+off))}else{None};
+                        let remaining_secs=effect_remaining(begin,current_time,20.);
                         out.push(GrenadeView{id:index,kind:kind.into(),state:if active{"active"}else{"flying"}.into(),
-                            position,radius_units:if kind=="smoke"{160.}else{135.},trajectory:points,fire_cells:vec![]});
+                            position,radius_units:if kind=="smoke"{160.}else{135.},trajectory:points,fire_cells:vec![],
+                            remaining_secs,timer_estimated:false});
                     }
                 }
             }
@@ -434,6 +487,7 @@ impl CS2Reader {
         let list=p.u64(base+list_off);if list==0{return Err("dwEntityList empty; loading scene or invalid offsets".into());}
         let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
+        let current_time=self.game_time(p,base);
         let bomb_timer=self.planted_c4_timer(p,base);
         diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
         diag.set("local_controller_found",json!(if local!=0 {1}else{0}));
@@ -539,7 +593,9 @@ impl CS2Reader {
             if is_local {if let Some(m)=local_motion.as_mut(){if weapon!="—"{m.weapon=Some(weapon.clone());}}}
             let entry=Player{id:slot,name:if name.is_empty(){if is_local{"Вы".into()}else{format!("Player {slot}")}}else{name},
                 team,local:is_local,health:hp.filter(|n|(0..=200).contains(n)),life_state:life.into(),health_verified:life=="alive",
-                armor,helmet,defuser,money,position:xyz,yaw,weapon,inventory,has_c4,c4_source:None};
+                armor,helmet,defuser,money,position:xyz,yaw,weapon,inventory,has_c4,c4_source:None,
+                is_flashed:if life=="alive"{self.flash_state(p,pawn)}else{Some(false)},
+                flash_remaining_secs:None,agent_model:if details{self.agent_model(p,node)}else{None}};
             if let Some(prev)=pawns.get(&pawn){
                 diag.add("duplicate_pawns");
                 let rank=|p:&Player|(p.local as u8,match p.life_state.as_str(){"alive"=>2,"dead"=>1,_=>0});
@@ -562,7 +618,7 @@ impl CS2Reader {
         let observer_view=self.read_observer_view(p,list,local,local_pawn,&pawns);
         diag.set("observer_target_found",json!(observer_view.is_some()));
         diag.set("observer_mode",json!(observer_view.as_ref().map(|v|v.mode)));
-        let grenades=if grenade_scan{self.scan_grenades(p,list,&mut diag)}else{vec![]};
+        let grenades=if grenade_scan{self.scan_grenades(p,list,base,current_time,&mut diag)}else{vec![]};
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
         diag.set("c4_global_unowned",json!(if unowned {1}else{0}));
@@ -614,4 +670,118 @@ impl CS2Reader {
   }
   assert_eq!(CS2Reader::grenade_class("weapon_flashbang"),None);
  }
+}
+
+#[cfg(test)]
+mod bomb_read_tests {
+    use super::*;
+    use crate::{model::demo_snapshot, process::FakeMemory};
+
+    fn reader() -> CS2Reader {
+        let offsets=json!({"client.dll":{
+            "dwEntityList":8,"dwLocalPlayerController":16,"dwWeaponC4":24,
+            "dwGameEntitySystem":32,"dwGameEntitySystem_highestEntityIndex":64
+        }});
+        let client=json!({"client.dll":{"classes":{
+            "CCSPlayerController":{"fields":{"m_hPlayerPawn":4}},
+            "C_BaseEntity":{"fields":{"m_iTeamNum":4,"m_iHealth":8,"m_pGameSceneNode":48,"m_hOwnerEntity":56}},
+            "CGameSceneNode":{"fields":{"m_vecAbsOrigin":16}},
+            "C_BasePlayerPawn":{"fields":{"m_pWeaponServices":64}},
+            "CPlayer_WeaponServices":{"fields":{"m_hActiveWeapon":4,"m_hMyWeapons":16}},
+            "C_EconEntity":{"fields":{"m_AttributeManager":80}},
+            "C_AttributeContainer":{"fields":{"m_Item":8}},
+            "C_EconItemView":{"fields":{"m_iItemDefinitionIndex":4}},
+            "C_CSPlayerPawnBase":{"fields":{"m_flFlashOverlayAlpha":96}},
+            "CSkeletonInstance":{"fields":{"m_modelState":128}},
+            "CModelState":{"fields":{"m_ModelName":32}}
+        }}});
+        CS2Reader::new(Schema::from_json(&offsets,&client,json!({})).unwrap())
+    }
+    fn put_entity(p:&mut FakeMemory,index:u32,ptr:u64) {
+        let block=0x100000+(index>>9) as u64*0x10000;
+        p.put(0x20000+0x10+8*(index>>9) as u64,&block.to_le_bytes());
+        // Include empty entries so the production bulk-read path is exercised.
+        p.put(block,&vec![0;512*0x78]);
+        p.put(block+(index&511) as u64*0x78,&ptr.to_le_bytes());
+    }
+    #[test]
+    fn flash_state_tracks_current_alpha_and_preserves_unknown_reads(){
+        let r=reader();let mut p=FakeMemory::new();
+        assert_eq!(r.flash_state(&mut p,0x30000),None);
+        p.put(0x30000+96,&128f32.to_le_bytes());
+        assert_eq!(r.flash_state(&mut p,0x30000),Some(true));
+        p.put(0x30000+96,&0f32.to_le_bytes());
+        assert_eq!(r.flash_state(&mut p,0x30000),Some(false));
+    }
+    #[test]
+    fn model_identity_is_read_from_the_actual_pawn_model(){
+        let r=reader();let mut p=FakeMemory::new();
+        p.put(0x30000+128+32,&0x40000u64.to_le_bytes());
+        let mut bytes=vec![0;192];let name=b"characters/models/tm_phoenix/tm_phoenix.vmdl";
+        bytes[..name.len()].copy_from_slice(name);p.put(0x40000,&bytes);
+        assert_eq!(r.agent_model(&mut p,0x30000).as_deref(),Some("characters/models/tm_phoenix/tm_phoenix.vmdl"));
+    }
+    #[test]
+    fn inventory_keeps_two_distinct_flashbangs(){
+        let mut r=reader();let mut p=FakeMemory::new();
+        p.put(0x30000+64,&0x40000u64.to_le_bytes());p.put(0x40000+4,&0u32.to_le_bytes());
+        let mut vector=[0u8;16];vector[..4].copy_from_slice(&2u32.to_le_bytes());
+        vector[8..].copy_from_slice(&0x50000u64.to_le_bytes());
+        p.put(0x40000+16,&vector);p.put(0x50000,&100u32.to_le_bytes());p.put(0x50004,&101u32.to_le_bytes());
+        put_entity(&mut p,100,0x60000);
+        p.put(0x100000+101*0x78,&0x61000u64.to_le_bytes());
+        p.put(0x60000+92,&43u16.to_le_bytes());p.put(0x61000+92,&43u16.to_le_bytes());
+        let (_,inventory,c4)=r.player_items(&mut p,0x20000,0x30000);
+        assert_eq!(inventory,vec!["Flashbang","Flashbang"]);assert_eq!(c4,Some(false));
+    }
+    #[test]
+    fn holstered_c4_is_found_in_network_weapon_vector() {
+        let mut r=reader();let mut p=FakeMemory::new();
+        p.put(0x30000+64,&0x40000u64.to_le_bytes());
+        p.put(0x40000+4,&0u32.to_le_bytes());
+        // C_NetworkUtlVectorBase: count at +0, handle-data pointer at +8.
+        let mut vector=[0u8;16];vector[..4].copy_from_slice(&1u32.to_le_bytes());
+        vector[8..].copy_from_slice(&0x50000u64.to_le_bytes());
+        p.put(0x40000+16,&vector);p.put(0x50000,&100u32.to_le_bytes());
+        put_entity(&mut p,100,0x60000);p.put(0x60000+92,&49u16.to_le_bytes());
+        let (weapon,inventory,c4)=r.player_items(&mut p,0x20000,0x30000);
+        assert_eq!(weapon,"—");assert_eq!(inventory,vec!["C4"]);assert_eq!(c4,Some(true));
+    }
+    #[test]
+    fn dropped_c4_above_old_scan_limit_is_found() {
+        let mut r=reader();let mut p=FakeMemory::new();
+        let base=0x70000;
+        p.put(base+32,&0x80000u64.to_le_bytes());p.put(0x80000+64,&6000i32.to_le_bytes());
+        put_entity(&mut p,6000,0x90000);
+        p.put(0x90000+92,&49u16.to_le_bytes());
+        p.put(0x90000+56,&u32::MAX.to_le_bytes());
+        p.put(0x90000+48,&0xa0000u64.to_le_bytes());
+        let xyz:Vec<u8>=[120f32,240.,16.].iter().flat_map(|x|x.to_le_bytes()).collect();
+        p.put(0xa0000+16,&xyz);
+        let (owner,world,unowned,_)=r.scan_c4(&mut p,0x20000,base,&BTreeMap::new());
+        assert_eq!(owner,None);assert!(unowned);assert_eq!(world.unwrap().position,[120.,240.,16.]);
+    }
+    #[test]
+    fn unreadable_owner_does_not_turn_carried_c4_into_dropped() {
+        let mut r=reader();let mut p=FakeMemory::new();let base=0x70000;
+        p.put(base+24,&0x90000u64.to_le_bytes());p.put(0x90000+92,&49u16.to_le_bytes());
+        p.put(0x90000+48,&0xa0000u64.to_le_bytes());
+        let xyz:Vec<u8>=[120f32,240.,16.].iter().flat_map(|x|x.to_le_bytes()).collect();
+        p.put(0xa0000+16,&xyz);
+        let mut player=demo_snapshot(1.).players[1].clone();player.has_c4=Some(true);
+        let (_,world,unowned,_)=r.scan_c4(&mut p,0x20000,base,&BTreeMap::from([(0xb0000,player)]));
+        assert!(world.is_none());assert!(!unowned);
+    }
+}
+
+#[cfg(test)]mod telemetry_tests {
+    use super::*;
+    #[test]fn effect_timer_uses_replicated_tick_and_rejects_wrong_clocks(){
+        assert_eq!(effect_remaining(Some(6400),Some(105.),20.),Some(15.));
+        assert_eq!(effect_remaining(Some(6400),Some(105.),7.),Some(2.));
+        assert_eq!(effect_remaining(Some(6400),Some(120.),20.),Some(0.));
+        assert!(effect_remaining(Some(6400),Some(40.),20.).is_none());
+        assert!(effect_remaining(Some(0),Some(105.),20.).is_none());
+        assert!(effect_remaining(Some(6400),None,20.).is_none());
+    }
 }

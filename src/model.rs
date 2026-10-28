@@ -23,6 +23,9 @@ pub struct Player {
     pub has_c4: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub c4_source: Option<String>,
+    #[serde(default)] pub is_flashed: Option<bool>,
+    #[serde(default)] pub flash_remaining_secs: Option<f32>,
+    #[serde(default)] pub agent_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +51,8 @@ pub struct GrenadeView {
     pub radius_units:f32,
     pub trajectory:Vec<[f32;3]>,
     pub fire_cells:Vec<[f32;3]>,
+    #[serde(default)] pub remaining_secs: Option<f32>,
+    #[serde(default)] pub timer_estimated: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ObserverView {
@@ -120,6 +125,16 @@ pub struct Snapshot {
     pub game_map_source: String,
     #[serde(default,skip_serializing_if="Option::is_none")] pub local_motion:Option<LocalMotion>,
     #[serde(default,skip_serializing_if="Option::is_none")] pub noise:Option<NoiseState>,
+}
+
+/// A one-step height change is not a separate floor. Never infer a level
+/// without a known local/observer reference or from non-finite coordinates.
+pub const HEIGHT_THRESHOLD_UNITS:f32=64.;
+pub fn relative_height(position:[f32;3],reference:Option<[f32;3]>)->i8 {
+    let Some(reference)=reference else{return 0;};
+    if !position.iter().chain(reference.iter()).all(|v|v.is_finite()){return 0;}
+    let delta=position[2]-reference[2];
+    if delta>HEIGHT_THRESHOLD_UNITS {1} else if delta < -HEIGHT_THRESHOLD_UNITS {-1} else {0}
 }
 
 pub fn now_secs() -> f64 {
@@ -209,17 +224,19 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
             health:Some(if dead {0} else {100-8*(i as i32%3)}),
             life_state:if dead {"dead"} else {"alive"}.into(),health_verified:!dead,
             armor:if i%2==1 {100} else {50},helmet:i%2==1,defuser:false,money:Some(2500+i as i32*700),
-            position:[x+(90.*a.cos()) as f32,y+(65.*a.sin()) as f32,-150.],
+            position:[x+(90.*a.cos()) as f32,y+(65.*a.sin()) as f32,if i==0 {30.} else if i==1 {-330.} else {-150.}],
             yaw:if dead {None} else {Some(((a+0.4).to_degrees()%360.-180.) as f32)},
-            weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None});
+            weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None,
+            is_flashed:Some(i==0 && t.rem_euclid(8.)<3.),flash_remaining_secs:None,
+            agent_model:Some(if team==2 {"characters/models/tm_phoenix/tm_phoenix.vmdl"}else{"characters/models/ctm_sas/ctm_sas.vmdl"}.into())});
     }
     Snapshot { status:"demo".into(),local_team:3,players,
         grenades_read:true,
         grenades:vec![
-          GrenadeView{id:1001,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![]},
-          GrenadeView{id:1002,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]]},
+          GrenadeView{id:1001,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![],remaining_secs:Some(20.-t.rem_euclid(20.) as f32),timer_estimated:false},
+          GrenadeView{id:1002,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]],remaining_secs:Some(7.-t.rem_euclid(7.) as f32),timer_estimated:false},
           GrenadeView{id:1003,kind:"smoke".into(),state:"flying".into(),position:[-1430.,-430.,-110.],radius_units:160.,
-             trajectory:vec![[-1680.,-650.,-140.],[-1600.,-560.,-80.],[-1510.,-490.,-95.],[-1430.,-430.,-110.]],fire_cells:vec![]}
+             trajectory:vec![[-1680.,-650.,-140.],[-1600.,-560.,-80.],[-1510.,-490.,-95.],[-1430.,-430.,-110.]],fire_cells:vec![],remaining_secs:None,timer_estimated:false}
         ],
         local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),shots_fired:Some(0),weapon:Some("AK-47".into())}),
         bomb_carrier_id:Some(2),bomb_carrier_source:Some("inventory".into()),
@@ -240,6 +257,29 @@ impl Diagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]fn height_indicators_have_a_deadband_and_require_a_reference(){
+        let center=Some([0.,0.,100.]);
+        assert_eq!(relative_height([0.,0.,164.],center),0);
+        assert_eq!(relative_height([0.,0.,165.],center),1);
+        assert_eq!(relative_height([0.,0.,35.],center),-1);
+        assert_eq!(relative_height([0.,0.,500.],None),0);
+        assert_eq!(relative_height([0.,0.,f32::NAN],center),0);
+    }
+    #[test]fn new_telemetry_fields_are_optional_for_old_snapshots(){
+        let mut old=serde_json::to_value(demo_snapshot(0.)).unwrap();
+        for player in old["players"].as_array_mut().unwrap(){
+            let player=player.as_object_mut().unwrap();
+            for field in ["is_flashed","flash_remaining_secs","agent_model"]{player.remove(field);}
+        }
+        for grenade in old["grenades"].as_array_mut().unwrap(){
+            let grenade=grenade.as_object_mut().unwrap();
+            grenade.remove("remaining_secs");grenade.remove("timer_estimated");
+        }
+        let decoded:Snapshot=serde_json::from_value(old).unwrap();
+        assert!(decoded.players[0].is_flashed.is_none());
+        assert!(decoded.grenades[0].remaining_secs.is_none());
+        assert!(!decoded.grenades[0].timer_estimated);
+    }
     #[test] fn life_flags(){assert_eq!(life_state(Some(100),Some(true)),"alive");assert_eq!(life_state(Some(0),Some(false)),"dead");assert_eq!(life_state(None,None),"unknown");}
     #[test] fn yaw(){assert_eq!(normalized_yaw(Some([0.,450.,0.])),Some(90.));assert!(normalized_yaw(Some([0.,f32::NAN,0.])).is_none());}
     #[test] fn map(){assert_eq!(normalize_map_name("maps/de_mirage.vpk").unwrap(),"de_mirage");assert!(normalize_map_name("../../bad.cfg").is_none());}

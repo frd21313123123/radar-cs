@@ -22,6 +22,24 @@ pub fn screen_point(position:[f32;3], overview:(f32,f32,f32), width:f32, height:
     Some((width/2.+(u-cx)*side,height/2.+(v-cy)*side))
 }
 
+
+/// Rotate with the map, then retain distant markers at the visible edge.
+/// Insets reserve space for the header and the readable player labels.
+pub fn marker_point(point:(f32,f32),width:f32,height:f32,angle:f32)->Option<(f32,f32,bool)> {
+    if ![point.0,point.1,width,height,angle].iter().all(|v|v.is_finite()) || width<100. || height<100. {return None;}
+    let (cx,cy)=(width/2.,height/2.);
+    let (sin,cos)=angle.to_radians().sin_cos();
+    let (dx,dy)=(point.0-cx,point.1-cy);
+    let (x,y)=(cx+dx*cos-dy*sin,cy+dx*sin+dy*cos);
+    let (left,right,top,bottom)=(30.,width-30.,65.,height-62.);
+    if x>=left&&x<=right&&y>=top&&y<=bottom{return Some((x,y,false));}
+    let (dx,dy)=(x-cx,y-cy);
+    let mut t=1.0f32;
+    if dx>0. {t=t.min((right-cx)/dx);} else if dx<0. {t=t.min((left-cx)/dx);}
+    if dy>0. {t=t.min((bottom-cy)/dy);} else if dy<0. {t=t.min((top-cy)/dy);}
+    Some((cx+dx*t,cy+dy*t,true))
+}
+
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(default)]
 pub struct OverlaySettings {
@@ -44,7 +62,7 @@ pub struct OverlaySettings {
 }
 impl Default for OverlaySettings {
     fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,show_bomb_timer:true,
-        zoom:1.5,opacity:100,friend_color:"#3b82f6".into(),
+        zoom:1.0,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
@@ -62,7 +80,7 @@ impl OverlaySettings {
         if let Some(x)=o.get("show_fire"){self.show_fire=x.as_bool().ok_or("show_fire must be boolean")?;}
         if let Some(x)=o.get("show_paths"){self.show_paths=x.as_bool().ok_or("show_paths must be boolean")?;}
         if let Some(x)=o.get("show_bomb_timer"){self.show_bomb_timer=x.as_bool().ok_or("show_bomb_timer must be boolean")?;}
-        if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.7..=4.).contains(&z){return Err("zoom outside 0.7-4".into());}self.zoom=z as f32;}
+        if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.35..=4.).contains(&z){return Err("zoom outside 0.35-4".into());}self.zoom=z as f32;}
         if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
         for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
             if let Some(x)=o.get(key){let col=x.as_str().ok_or("color must be string")?;
@@ -116,7 +134,8 @@ mod win {
     const WM_CLOSE:u32=0x10;const WM_DESTROY:u32=0x02;const WM_PAINT:u32=0x0F;const WM_ERASEBKGND:u32=0x14;const WM_GETMINMAXINFO:u32=0x24;
     const WM_TIMER:u32=0x113;const WM_MOUSEWHEEL:u32=0x20A;const WM_KEYDOWN:u32=0x100;const WM_APP_SETTINGS:u32=0x8001;
     const SW_HIDE:i32=0;const SW_SHOW:i32=5;
-    const WS_OVERLAPPEDWINDOW:u32=0x00cf0000;const WS_EX_TOPMOST:u32=0x00000008;
+    const WS_POPUP:u32=0x80000000;const WS_THICKFRAME:u32=0x00040000;
+    const WM_NCCALCSIZE:u32=0x83;const WM_NCHITTEST:u32=0x84;const WM_LBUTTONUP:u32=0x202;const WS_EX_TOPMOST:u32=0x00000008;
     const WS_EX_LAYERED:u32=0x00080000;const SWP_NOMOVE:u32=0x0002;const SWP_NOSIZE:u32=0x0001;const SWP_NOACTIVATE:u32=0x0010;
     const LWA_ALPHA:u32=0x0002;const TRANSPARENT:i32=1;
     const SRCCOPY:u32=0x00CC0020; // CAS_ANTI_FLICKER_V11
@@ -140,6 +159,8 @@ mod win {
         fn SetWindowPos(hwnd:HWND,after:HWND,x:i32,y:i32,w:i32,h:i32,flags:u32)->i32;
         fn SetLayeredWindowAttributes(hwnd:HWND,key:u32,alpha:u8,flags:u32)->i32;
         fn GetClientRect(hwnd:HWND,rect:*mut Rect)->i32;
+        fn GetWindowRect(hwnd:HWND,rect:*mut Rect)->i32;
+        fn ScreenToClient(hwnd:HWND,point:*mut Point)->i32;
         fn InvalidateRect(hwnd:HWND,rect:*const Rect,erase:i32)->i32;
         fn BeginPaint(hwnd:HWND,paint:*mut Paint)->HDC;fn EndPaint(hwnd:HWND,paint:*const Paint)->i32;
         fn SetTimer(hwnd:HWND,id:usize,period:u32,cb:*const c_void)->usize;
@@ -153,6 +174,7 @@ mod win {
     #[link(name="gdi32")]extern "system" {
         fn SetBkMode(dc:HDC,mode:i32)->i32;fn SetTextColor(dc:HDC,color:u32)->u32;
         fn TextOutW(dc:HDC,x:i32,y:i32,text:*const u16,len:i32)->i32;
+        fn GetTextExtentPoint32W(dc:HDC,text:*const u16,len:i32,size:*mut Point)->i32;
         fn CreateFontW(height:i32,width:i32,escapement:i32,orientation:i32,weight:i32,
             italic:u32,underline:u32,strike:u32,charset:u32,out_precision:u32,
             clip_precision:u32,quality:u32,pitch:u32,face:*const u16)->*mut c_void;
@@ -314,7 +336,51 @@ mod win {
             }
         }
     }
+    #[derive(Clone)]
+    struct Label{x:i32,y:i32,text:String,color:u32,center:bool}
+    thread_local!{static LABELS:RefCell<Vec<Label>>=const{RefCell::new(Vec::new())};}
+    fn label(x:f32,y:f32,text:String,color:u32){
+        LABELS.with(|labels|labels.borrow_mut().push(Label{x:x.round() as i32,y:y.round() as i32,text,color,center:true}));
+    }
+    fn rectangle(g:*mut c_void,x:i32,y:i32,w:i32,h:i32,color:u32){unsafe{
+        let b=brush(g,color);if !b.is_null(){GdipFillRectangleI(g,b,x,y,w,h);GdipDeleteBrush(b);}
+    }}
+    fn segments(g:*mut c_void,lines:&[(i32,i32,i32,i32)],color:u32,width:f32){unsafe{
+        let mut pen=null_mut();if GdipCreatePen1(color,width,2,&mut pen)==0&&!pen.is_null(){
+            for &(x1,y1,x2,y2) in lines{GdipDrawLineI(g,pen,x1,y1,x2,y2);}
+            GdipDeletePen(pen);
+        }
+    }}
+    fn height_arrow(g:*mut c_void,x:i32,y:i32,level:i8){
+        if level==0{return;}
+        let dy=if level>0{-1}else{1};
+        segments(g,&[(x,y-7*dy,x,y+7*dy),(x-4,y+3*dy,x,y+7*dy),(x+4,y+3*dy,x,y+7*dy)],0xfff2f7fc,2.4);
+    }
+    fn flash_cross(g:*mut c_void,x:i32,y:i32){
+        // Two crossed white arrows remain recognizable without color vision.
+        segments(g,&[(x-10,y-10,x+10,y+10),(x+4,y+10,x+10,y+10),(x+10,y+4,x+10,y+10),
+            (x+10,y-10,x-10,y+10),(x-10,y+4,x-10,y+10),(x-4,y+10,x-10,y+10)],0xffffffff,2.8);
+    }
+    fn weapon_glyph(g:*mut c_void,x:i32,y:i32,weapon:&str){
+        if weapon=="—"||weapon.is_empty(){return;}
+        let color=0xffe7f0f8;
+        if matches!(weapon,"Flashbang"|"Smoke"|"HE Grenade"|"Molotov"|"Incendiary"|"Decoy"){
+            rectangle(g,x-5,y-4,10,9,color);segments(g,&[(x-2,y-7,x+3,y-7),(x+3,y-7,x+6,y-3)],color,2.);
+        }else if weapon=="Knife"{
+            segments(g,&[(x-12,y+4,x+12,y-4),(x-7,y+7,x-3,y-1),(x-3,y-1,x+12,y-4)],color,2.4);
+        }else if weapon=="C4"{
+            rectangle(g,x-9,y-5,18,10,color);rectangle(g,x-4,y-3,8,5,0xff24313e);
+        }else{
+            let pistol=matches!(weapon,"Glock-18"|"USP-S"|"USP-Silencer"|"P250"|"Five-SeveN"|"Tec-9"|"CZ75-Auto"|"Desert Eagle"|"Dual Berettas"|"R8 Revolver"|"P2000");
+            let sniper=matches!(weapon,"AWP"|"SSG 08"|"SCAR-20"|"G3SG1");
+            rectangle(g,x-9,y-3,if pistol{14}else{20},5,color);
+            segments(g,&[(x-6,y,x-8,y+6),(x+5,y-2,x+(if pistol{11}else{19}),y-2)],color,2.3);
+            if !pistol{segments(g,&[(x-10,y-1,x-17,y+3),(x-17,y+3,x-17,y-3),(x-1,y+2,x+3,y+7)],color,2.5);}
+            if sniper{rectangle(g,x-3,y-7,12,3,color);}
+        }
+    }
     fn overlay_frame(g:*mut c_void,dc:HDC,width:i32,height:i32,bridge:&WindowBridge){
+        LABELS.with(|labels|labels.borrow_mut().clear());
         let snap=bridge.state.lock().ok().map(|st|st.snapshot());
         let (snap,mapdata,game_map)=if let Some(s)=snap {
             let st=bridge.state.lock().ok();let map=s.game_map.clone();let data=st.as_ref().map(|x|x.maps["maps"][&map]["radar_info"].clone()).unwrap_or(Value::Null);
@@ -443,16 +509,56 @@ mod win {
                 }
             }
         }
+        // Reset first: labels, weapon icons and vertical arrows stay upright.
+        if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
+        let age=(crate::model::now_secs()-snap.time).max(0.0) as f32;
+        for nade in &snap.grenades{
+            let enabled=(nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire);
+            if nade.state!="active"||!enabled{continue;}
+            if let Some(remaining)=nade.remaining_secs.filter(|n|n.is_finite()).map(|n|(n-age).max(0.)){
+                if remaining<=0.{continue;}
+                let at=screen_point(nade.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
+                    .and_then(|p|marker_point(p,width as f32,height as f32,camera_angle.unwrap_or(0.)));
+                if let Some((x,y,false))=at{
+                    rectangle(g,x as i32-23,y as i32-11,46,22,0xef101820);
+                    label(x,y-9.,format!("{}{remaining:.1}",if nade.timer_estimated{"~"}else{""}),0xfff3f7fa);
+                }
+            }
+        }
         for p in &snap.players {
             if p.life_state!="alive" {continue;}
-            let (x,y)=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center) {Some(v)=>v,None=>continue};
-            if x < -20.||y < -20.||x > width as f32+20.||y > height as f32+20.{continue;}
+            let raw=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){Some(v)=>v,None=>continue};
+            let (x,y,edge)=match marker_point(raw,width as f32,height as f32,camera_angle.unwrap_or(0.)){Some(v)=>v,None=>continue};
             let col=if p.local {argb(&cfg.self_color)}else if p.team==snap.local_team {argb(&cfg.friend_color)}else {argb(&cfg.enemy_color)};
-            fill_circle(g,x as i32,y as i32,9,0xff071018);
-            if let Some(yaw)=p.yaw {triangle(g,x,y,yaw.to_radians(),col);}else{fill_circle(g,x as i32,y as i32,6,col);}
-            if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32,y as i32-18,4,0xffffcb70);}
+            fill_circle(g,x as i32,y as i32,10,0xff071018);
+            let yaw=if edge {
+                // The edge chevron points to the actual offscreen location.
+                let (sin,cos)=camera_angle.unwrap_or(0.).to_radians().sin_cos();
+                let (dx,dy)=(raw.0-width as f32/2.,raw.1-height as f32/2.);
+                Some((-(dx*sin+dy*cos)).atan2(dx*cos-dy*sin))
+            }else{p.yaw.map(|yaw|(yaw-camera_angle.unwrap_or(0.)).to_radians())};
+            if let Some(yaw)=yaw{triangle(g,x,y,yaw,col);}else{fill_circle(g,x as i32,y as i32,6,col);}
+            if edge{label(x,y-30.,"ДАЛЕКО".into(),0xffc7d9e6);}
+            if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32-17,y as i32-15,4,0xffffcb70);}
+            if !p.local&&p.team!=snap.local_team{
+                height_arrow(g,x as i32+18,y as i32,crate::model::relative_height(p.position,focus.as_ref().map(|p|p.position)));
+            }
+            if p.is_flashed.unwrap_or(p.flash_remaining_secs.is_some_and(|n|n>0.)) {flash_cross(g,x as i32,y as i32);}
+            rectangle(g,x as i32-17,y as i32+13,34,4,0xff15202b);
+            if let Some(hp)=p.health{
+                rectangle(g,x as i32-17,y as i32+13,(34.*(hp as f32/100.).clamp(0.,1.)) as i32,4,if hp<=30{0xffff7373}else{0xff80e5b2});
+                label(x,y+18.,format!("{hp} HP"),0xfff4f8fc);
+            }else{label(x,y+18.,"? HP".into(),0xffb2c3cf);}
+            if p.weapon!="—"&&!p.weapon.is_empty(){
+                // Keep the exact weapon name alongside a compact silhouette.
+                weapon_glyph(g,x as i32,y as i32+38,&p.weapon);
+                label(x,y+45.,p.weapon.clone(),0xffd9e8f1);
+            }
         }
-        if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
+        // Custom chrome is drawn last and never rotates with the map.
+        rectangle(g,0,0,width,34,0xf5101822);
+        rectangle(g,width-40,4,34,30,0xff34232c);
+        segments(g,&[(width-29,13,width-17,25),(width-17,13,width-29,25)],0xffffdce3,2.);
         let bomb_lines=if cfg.show_bomb_timer{
             snap.bomb_timer.as_ref().and_then(|timer|{
                 let age=(crate::model::now_secs()-snap.time).clamp(0.0,1.5) as f32;
@@ -468,10 +574,13 @@ mod win {
         let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
         if cfg.follow_spectator {
             if let Some(target)=focus.as_ref().filter(|p|p.spectating){
-                let short:String=target.name.chars().take(18).collect();
+                let short:String=target.name.chars().take(12).collect();
                 text.push_str(&format!(" | OBS: {short}"));
             }
         }
+        // Leave room for the independent close control at every window size.
+        let max_chars=((width-62)/7).max(4) as usize;
+        text=text.chars().take(max_chars).collect();
         let _=dc;
         STATUS.with(|s|{*s.borrow_mut()=text;});
     }
@@ -487,6 +596,24 @@ mod win {
     }
     unsafe extern "system" fn wnd_proc(hwnd:HWND,msg:u32,wparam:usize,lparam:isize)->isize {
         match msg {
+            // Remove Windows non-client chrome while retaining native resizing.
+            WM_NCCALCSIZE=>0,
+            WM_NCHITTEST=>{
+                let mut point=Point{x:(lparam as u16 as i16) as i32,y:((lparam>>16) as u16 as i16) as i32};
+                let mut frame=Rect::default();GetWindowRect(hwnd,&mut frame);
+                let (left,right,top,bottom)=(point.x<frame.left+6,point.x>=frame.right-6,point.y<frame.top+6,point.y>=frame.bottom-6);
+                if top&&left{return 13;}if top&&right{return 14;}
+                if bottom&&left{return 16;}if bottom&&right{return 17;}
+                if left{return 10;}if right{return 11;}if top{return 12;}if bottom{return 15;}
+                ScreenToClient(hwnd,&mut point);let mut client=Rect::default();GetClientRect(hwnd,&mut client);
+                if point.y<34&&point.x<client.right-40 {2} else {1}
+            }
+            WM_LBUTTONUP=>{
+                let x=(lparam as u16 as i16) as i32;let y=((lparam>>16) as u16 as i16) as i32;
+                let mut rect=Rect::default();GetClientRect(hwnd,&mut rect);
+                if x>=rect.right-40&&x<rect.right-6&&(4..34).contains(&y){PostMessageW(hwnd,WM_CLOSE,0,0);}
+                0
+            }
             WM_CLOSE=>{if let Some(b)=GLOBAL.get(){if let Ok(mut s)=b.settings.lock(){s.visible=false;
                 let _=std::fs::write(b.cache.join("overlay_settings.json"),serde_json::to_vec_pretty(&*s).unwrap_or_default());
             }}ShowWindow(hwnd,SW_HIDE);0}
@@ -509,14 +636,15 @@ mod win {
                 }0
             }
             WM_MOUSEWHEEL=>{if let Some(b)=GLOBAL.get(){let delta=((wparam>>16) as u16) as i16;
-                if let Ok(mut cfg)=b.settings.lock(){cfg.zoom=(cfg.zoom * if delta>0 {1.10}else{0.90}).clamp(0.7,4.);}
+                if let Ok(mut cfg)=b.settings.lock(){cfg.zoom=(cfg.zoom * if delta>0 {1.10}else{0.90}).clamp(0.35,4.);}
             }InvalidateRect(hwnd,null(),0);0}
             WM_KEYDOWN=>{
                 if let Some(b)=GLOBAL.get(){if let Ok(mut cfg)=b.settings.lock(){match wparam {
+                    0x1b=>{drop(cfg);PostMessageW(hwnd,WM_CLOSE,0,0);return 0;}, // Escape
                     0x43=>cfg.center_local=!cfg.center_local, // C
                     0x54=>cfg.topmost=!cfg.topmost, // T
                     0x6b|0xbb=>cfg.zoom=(cfg.zoom*1.1).min(4.), // +
-                    0x6d|0xbd=>cfg.zoom=(cfg.zoom*0.9).max(0.7), // -
+                    0x6d|0xbd=>cfg.zoom=(cfg.zoom*0.9).max(0.35), // -
                     _=>{}
                 }}update_window(hwnd);}0
             }
@@ -543,8 +671,34 @@ mod win {
                                 if let Some(b)=GLOBAL.get(){overlay_frame(g,mem,w,h,b);}
                                 GdipDeleteGraphics(g);
                             }
-                            SetBkMode(mem,TRANSPARENT);SetTextColor(mem,0x00c9e5ee);
-                            STATUS.with(|s|{let t=wide(&s.borrow());if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}});
+                            SetBkMode(mem,TRANSPARENT);
+                            let face=wide("Segoe UI");
+                            let font=CreateFontW(-13,0,0,0,650,0,0,0,1,0,0,5,0,face.as_ptr());
+                            let previous=if !font.is_null(){Some(SelectObject(mem,font))}else{None};
+                            LABELS.with(|labels|for label in labels.borrow().iter(){
+                                let text=wide(&label.text);let len=(text.len()-1) as i32;
+                                let mut extent=Point::default();GetTextExtentPoint32W(mem,text.as_ptr(),len,&mut extent);
+                                let x=(label.x-if label.center{extent.x/2}else{0}).clamp(3,(w-extent.x-3).max(3));
+                                let y=label.y.clamp(35,(h-extent.y-2).max(35));
+                                SetTextColor(mem,0x00101820);
+                                for (dx,dy) in [(-1,-1),(1,-1),(-1,1),(1,1)]{TextOutW(mem,x+dx,y+dy,text.as_ptr(),len);}
+                                let color=((label.color&0xff)<<16)|(label.color&0xff00)|((label.color>>16)&0xff);
+                                SetTextColor(mem,color);TextOutW(mem,x,y,text.as_ptr(),len);
+                            });
+                            if let Some(old)=previous{SelectObject(mem,old);DeleteObject(font);}
+                            SetTextColor(mem,0x00c9e5ee);
+                            STATUS.with(|s|{
+                                // Keep long map / observer names clear of the close button.
+                                let mut title=s.borrow().clone();
+                                loop {
+                                    let t=wide(&title);let mut size=Point::default();
+                                    GetTextExtentPoint32W(mem,t.as_ptr(),(t.len()-1) as i32,&mut size);
+                                    if size.x<=(w-65).max(0)||title.is_empty(){
+                                        if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}break;
+                                    }
+                                    title.pop();
+                                }
+                            });
                             BOMB_LINES.with(|data|{
                                 if let Some(lines)=data.borrow().as_ref(){
                                     let face=wide("Segoe UI");
@@ -589,7 +743,7 @@ mod win {
         let wc=WindowClass{style:0,proc:Some(wnd_proc),cls_extra:0,wnd_extra:0,instance,icon:null_mut(),cursor:LoadCursorW(null_mut(),32512usize as *const u16),background:null_mut(),menu:null(),class:class.as_ptr()};
         if RegisterClassW(&wc)==0 {eprintln!("[overlay] RegisterClassW failed");GdiplusShutdown(gdip);return;}
         let title=wide("CAS Radar - Mini Map");
-        let hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,class.as_ptr(),title.as_ptr(),WS_OVERLAPPEDWINDOW,100,100,370,370,null_mut(),null_mut(),instance,null());
+        let hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,class.as_ptr(),title.as_ptr(),WS_POPUP|WS_THICKFRAME,100,100,370,370,null_mut(),null_mut(),instance,null());
         if hwnd.is_null(){eprintln!("[overlay] CreateWindowExW failed");GdiplusShutdown(gdip);return;}
         if let Some(b)=GLOBAL.get(){b.hwnd.store(hwnd as isize,Ordering::Release);}
         SetTimer(hwnd,1,16,null());
@@ -603,7 +757,7 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
-    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&s.follow_spectator&&!s.visible);assert!((s.zoom-1.5).abs()<0.01);}
+    #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&s.follow_spectator&&!s.visible);assert!((s.zoom-1.0).abs()<0.01);}
     #[test]fn observer_setting_roundtrip(){
         let mut s=OverlaySettings::default();assert!(s.follow_spectator);
         assert!(s.update(&json!({"follow_spectator":false})).is_ok());
@@ -621,6 +775,22 @@ mod win {
         assert!((p.0-180.).abs()<0.001 && (p.1-250.).abs()<0.001);
         let other=screen_point([-1000.,500.,0.],map,360.,500.,1.6,Some(me)).unwrap();
         assert!(other.0>180.);
+    }
+    #[test]fn edge_marker_preserves_direction_after_rotation(){
+        let (x,y,edge)=marker_point((2000.,180.),360.,360.,0.).unwrap();
+        assert!(edge);assert_eq!(x,330.);assert_eq!(y,180.);
+        let (x,y,edge)=marker_point((2000.,180.),360.,360.,90.).unwrap();
+        assert!(edge);assert!((x-180.).abs()<0.01);assert!((y-298.).abs()<0.01);
+        assert_eq!(marker_point((180.,180.),360.,360.,45.),Some((180.,180.,false)));
+        assert!(marker_point((f32::NAN,0.),360.,360.,0.).is_none());
+    }
+    #[test]fn wide_zoom_is_supported(){
+        let mut settings=OverlaySettings::default();
+        assert!(settings.update(&json!({"zoom":0.35})).is_ok());
+        assert!(settings.update(&json!({"zoom":0.34})).is_err());
+        let near=screen_point([3000.,0.,0.],(0.,0.,5.),360.,360.,1.,Some([0.,0.,0.])).unwrap();
+        let wide=screen_point([3000.,0.,0.],(0.,0.,5.),360.,360.,0.35,Some([0.,0.,0.])).unwrap();
+        assert!((wide.0-180.).abs()<(near.0-180.).abs());
     }
     #[test]fn invalid_projection(){assert!(screen_point([0.,0.,0.],(0.,0.,0.),320.,320.,1.,None).is_none());}
 }
