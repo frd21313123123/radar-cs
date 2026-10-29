@@ -92,6 +92,18 @@ public static class RadarSmokeWindow {
     $null = Request '/api/map-selection' 'POST' @{map=$null}
     Assert ((Request '/api/state').game_map -eq 'de_mirage') 'AUTO did not resume the game map'
     Write-Host 'PASS Windows runtime: HTTP, seven demo players, flash, utility clocks, Nuke selection, authentication, equipment icons, visible borderless native window, decoded PNG background, responsive loop, close persistence and reopening.'
+} catch {
+    $failure = $_
+    try { Write-Host ('Overlay failure status: ' + ((Request '/api/overlay') | ConvertTo-Json -Compress -Depth 4)) } catch { Write-Host 'Overlay diagnostic unavailable' }
+    if ($null -ne $process) {
+        $process.Refresh()
+        if (!$process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit(5000) | Out-Null }
+    }
+    if (Test-Path "$work/stderr.log") {
+        # Never print stdout, which contains the random access URL.
+        Get-Content "$work/stderr.log" | Where-Object { $_ -match '\[overlay\]|panicked|thread.*panic' } | ForEach-Object { Write-Host $_ }
+    }
+    throw $failure
 } finally {
     if ($null -ne $process) {
         $process.Refresh()
