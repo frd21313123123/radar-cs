@@ -151,6 +151,7 @@ pub struct OverlaySettings {
     pub marker_scale:f32,
     pub text_size:u8,
     pub zoom: f32,
+    pub max_fps:u8,
     pub opacity: u8,
     pub friend_color: String,
     pub enemy_color: String,
@@ -162,7 +163,7 @@ impl Default for OverlaySettings {
         show_height:true,show_flashed:true,show_c4:true,show_direction:true,show_allies:true,show_enemies:true,
         show_self:true,show_offscreen:true,show_utility_timers:true,noise_animation:true,noise_show_range:true,
         noise_opacity:75,noise_color:"#f2c477".into(),marker_scale:1.,text_size:13,
-        zoom:1.0,opacity:100,friend_color:"#3b82f6".into(),
+        zoom:1.0,max_fps:30,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
@@ -183,6 +184,7 @@ impl OverlaySettings {
                     "zoom"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.35..=4.).contains(&v)),
                     "marker_scale"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.65..=1.75).contains(&v)),
                     "text_size"=>value.as_u64().is_some_and(|v|(9..=18).contains(&v)),
+                    "max_fps"=>value.as_u64().is_some_and(|v|(15..=60).contains(&v)),
                     "opacity"=>value.as_u64().is_some_and(|v|(10..=100).contains(&v)),
                     "noise_opacity"=>value.as_u64().is_some_and(|v|(10..=100).contains(&v)),
                     _=>false,
@@ -232,7 +234,9 @@ impl OverlayController {
         #[cfg(not(windows))] let window_ready=false;
         #[cfg(windows)] let map_ready=self.inner.map_ready.load(std::sync::atomic::Ordering::Acquire);
         #[cfg(not(windows))] let map_ready=false;
-        json!({"supported":self.supported(),"window_ready":window_ready,"map_ready":map_ready,"settings":settings,"defaults":OverlaySettings::default()})
+        #[cfg(windows)] let (rendered_frames,buffer_allocations)=(self.inner.rendered_frames.load(std::sync::atomic::Ordering::Relaxed),self.inner.buffer_allocations.load(std::sync::atomic::Ordering::Relaxed));
+        #[cfg(not(windows))] let (rendered_frames,buffer_allocations)=(0u64,0u64);
+        json!({"supported":self.supported(),"window_ready":window_ready,"map_ready":map_ready,"settings":settings,"defaults":OverlaySettings::default(),"rendered_frames":rendered_frames,"buffer_allocations":buffer_allocations})
     }
     pub fn update(&self,v:&Value)->Result<Value,String>{
         #[cfg(not(windows))]{let _=v;return Err("Native overlay requires Windows".into());}
@@ -363,10 +367,10 @@ mod win {
     fn map_key(name:&str,layer:&str,maps:&Value)->String{
         format!("{name}/{layer}/{}",maps["maps"][name]["radar_paths"])
     }
-    pub struct WindowBridge {pub settings:Arc<Mutex<OverlaySettings>>,pub state:Arc<Mutex<SharedState>>,pub cache:std::path::PathBuf,pub offline:bool,pub hwnd:AtomicIsize,pub map_ready:AtomicBool}
+    pub struct WindowBridge {pub settings:Arc<Mutex<OverlaySettings>>,pub state:Arc<Mutex<SharedState>>,pub cache:std::path::PathBuf,pub offline:bool,pub hwnd:AtomicIsize,pub map_ready:AtomicBool,pub rendered_frames:AtomicU64,pub buffer_allocations:AtomicU64}
     impl WindowBridge {
         pub fn launch(settings:Arc<Mutex<OverlaySettings>>,state:Arc<Mutex<SharedState>>,cache:std::path::PathBuf,offline:bool)->Arc<Self>{
-            let bridge=Arc::new(Self{settings,state,cache,offline,hwnd:AtomicIsize::new(0),map_ready:AtomicBool::new(false)});
+            let bridge=Arc::new(Self{settings,state,cache,offline,hwnd:AtomicIsize::new(0),map_ready:AtomicBool::new(false),rendered_frames:AtomicU64::new(0),buffer_allocations:AtomicU64::new(0)});
             let _=GLOBAL.set(bridge.clone());
             thread::spawn(move||unsafe{run();});
             bridge
@@ -376,6 +380,41 @@ mod win {
         }let _=cfg;}
     }
     fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(std::iter::once(0)).collect()}
+    struct FrameBuffer{dc:HDC,bitmap:*mut c_void,previous:*mut c_void,width:i32,height:i32}
+    impl Default for FrameBuffer{fn default()->Self{Self{dc:null_mut(),bitmap:null_mut(),previous:null_mut(),width:0,height:0}}}
+    impl FrameBuffer{
+        unsafe fn clear(&mut self){
+            if !self.dc.is_null(){
+                if !self.previous.is_null(){SelectObject(self.dc,self.previous);}
+                if !self.bitmap.is_null(){DeleteObject(self.bitmap);}
+                DeleteDC(self.dc);
+            }
+            self.dc=null_mut();self.bitmap=null_mut();self.previous=null_mut();self.width=0;self.height=0;
+        }
+        unsafe fn get(&mut self,screen:HDC,width:i32,height:i32)->Option<HDC>{
+            if !self.dc.is_null()&&self.width==width&&self.height==height{return Some(self.dc);}
+            self.clear();self.dc=CreateCompatibleDC(screen);if self.dc.is_null(){return None;}
+            self.bitmap=CreateCompatibleBitmap(screen,width,height);
+            if self.bitmap.is_null(){self.clear();return None;}
+            self.previous=SelectObject(self.dc,self.bitmap);
+            if self.previous.is_null()||self.previous as isize == -1 {self.previous=null_mut();self.clear();return None;}
+            self.width=width;self.height=height;
+            if let Some(bridge)=GLOBAL.get(){bridge.buffer_allocations.fetch_add(1,Ordering::Relaxed);}
+            Some(self.dc)
+        }
+    }
+    impl Drop for FrameBuffer{fn drop(&mut self){unsafe{self.clear();}}}
+    thread_local!{
+        static FRAME_BUFFER:RefCell<FrameBuffer>=RefCell::new(FrameBuffer::default());
+        static FONTS:RefCell<std::collections::HashMap<(i32,i32),*mut c_void>>=RefCell::new(std::collections::HashMap::new());
+    }
+    unsafe fn font(height:i32,weight:i32)->*mut c_void{
+        FONTS.with(|fonts|{
+            let mut fonts=fonts.borrow_mut();if let Some(font)=fonts.get(&(height,weight)){return *font;}
+            let created=CreateFontW(height,0,0,0,weight,0,0,0,1,0,0,5,0,wide("Segoe UI").as_ptr());
+            if !created.is_null(){fonts.insert((height,weight),created);}created
+        })
+    }
     fn brush(g:*mut c_void,color:u32)->*mut c_void {let mut b=null_mut();unsafe{GdipCreateSolidFill(color,&mut b);}let _=g;b}
     fn fill_circle(g:*mut c_void,x:i32,y:i32,r:i32,color:u32){unsafe{let b=brush(g,color);if !b.is_null(){GdipFillEllipseI(g,b,x-r,y-r,2*r,2*r);GdipDeleteBrush(b);}}}
     fn triangle(g:*mut c_void,x:f32,y:f32,angle:f32,color:u32,scale:f32){
@@ -552,10 +591,12 @@ mod win {
         // decoded and drawn, not just that its download was scheduled.
         bridge.map_ready.store(false,Ordering::Release);
         LABELS.with(|labels|labels.borrow_mut().clear());
-        let data=bridge.state.lock().ok().map(|st|(st.snapshot(),st.maps.clone()));
-        let (snap,maps)=match data{Some(data)=>data,None=>return};
+        let data=bridge.state.lock().ok().map(|st|{
+            let snap=st.snapshot();let entry=st.maps["maps"][&snap.game_map].clone();(snap,entry)
+        });
+        let (snap,map_entry)=match data{Some(data)=>data,None=>return};
         let game_map=snap.game_map.clone();
-        let mapdata=&maps["maps"][&game_map]["radar_info"];
+        let mapdata=&map_entry["radar_info"];
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
         unsafe{GdipGraphicsClear(g,0xff10171d);}
         let focus=snap.radar_focus(cfg.follow_spectator);
@@ -588,7 +629,7 @@ mod win {
         let side=(width.min(height)-12).max(1) as f32*cfg.zoom;
         let (left,top)=screen_point([pos_x,pos_y,0.],(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
             .unwrap_or((0.,0.));
-        let wanted=map_key(&game_map,&layer,&maps);
+        let wanted=format!("{game_map}/{layer}/{}",map_entry["radar_paths"]);
         background_notice=CACHE.with(|image|{
             let map=image.borrow();
             if !map.image.is_null()&&map.key==wanted {
@@ -826,6 +867,7 @@ mod win {
         let bridge=match GLOBAL.get(){Some(b)=>b,None=>return};
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
         SetLayeredWindowAttributes(hwnd,0,((cfg.opacity as u16*255)/100) as u8,LWA_ALPHA);
+        SetTimer(hwnd,1,1000u32.div_ceil(u32::from(cfg.max_fps.max(1))),null());
         SetWindowPos(hwnd,if cfg.topmost{-1isize as HWND}else{-2isize as HWND},0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         if cfg.visible {ShowWindow(hwnd,SW_SHOW);}else{ShowWindow(hwnd,SW_HIDE);}
         if cfg.visible {InvalidateRect(hwnd,null(),0);UpdateWindow(hwnd);}
@@ -901,21 +943,17 @@ mod win {
                     let mut rect=Rect::default();GetClientRect(hwnd,&mut rect);
                     let w=(rect.right-rect.left).max(1);
                     let h=(rect.bottom-rect.top).max(1);
-                    let mem=CreateCompatibleDC(screen);
-                    if !mem.is_null(){
-                        let bmp=CreateCompatibleBitmap(screen,w,h);
-                        if !bmp.is_null(){
-                            let old=SelectObject(mem,bmp);
+                    FRAME_BUFFER.with(|buffer|{
+                        if let Some(mem)=buffer.borrow_mut().get(screen,w,h){
                             let mut g=null_mut();
                             if GdipCreateFromHDC(mem,&mut g)==0 {
                                 if let Some(b)=GLOBAL.get(){overlay_frame(g,mem,w,h,b);}
                                 GdipDeleteGraphics(g);
                             }
                             SetBkMode(mem,TRANSPARENT);
-                            let face=wide("Segoe UI");
                             let text_size=GLOBAL.get().and_then(|bridge|bridge.settings.lock().ok().map(|s|s.text_size)).unwrap_or(13);
-                            let font=CreateFontW(-(text_size as i32),0,0,0,650,0,0,0,1,0,0,5,0,face.as_ptr());
-                            let previous=if !font.is_null(){Some(SelectObject(mem,font))}else{None};
+                            let label_font=font(-(text_size as i32),650);
+                            let previous=if !label_font.is_null(){Some(SelectObject(mem,label_font))}else{None};
                             LABELS.with(|labels|for label in labels.borrow().iter(){
                                 let text=wide(&label.text);let len=(text.len()-1) as i32;
                                 let mut extent=Point::default();GetTextExtentPoint32W(mem,text.as_ptr(),len,&mut extent);
@@ -926,7 +964,7 @@ mod win {
                                 let color=((label.color&0xff)<<16)|(label.color&0xff00)|((label.color>>16)&0xff);
                                 SetTextColor(mem,color);TextOutW(mem,x,y,text.as_ptr(),len);
                             });
-                            if let Some(old)=previous{SelectObject(mem,old);DeleteObject(font);}
+                            if let Some(old)=previous{SelectObject(mem,old);}
                             SetTextColor(mem,0x00c9e5ee);
                             STATUS.with(|s|{
                                 // Keep long map / observer names clear of the close button.
@@ -942,20 +980,19 @@ mod win {
                             });
                             BOMB_LINES.with(|data|{
                                 if let Some(lines)=data.borrow().as_ref(){
-                                    let face=wide("Segoe UI");
-                                    let face_bold=CreateFontW(-21,0,0,0,700,0,0,0,1,0,0,5,0,face.as_ptr());
-                                    let face_small=CreateFontW(-16,0,0,0,500,0,0,0,1,0,0,5,0,face.as_ptr());
+                                    let face_bold=font(-21,700);
+                                    let face_small=font(-16,500);
                                     SetTextColor(mem,0x00dbe8f4);
                                     if !face_small.is_null(){
                                         let old=SelectObject(mem,face_small);
                                         let t=wide(&lines[0]);TextOutW(mem,95,57,t.as_ptr(),(t.len()-1) as i32);
-                                        SelectObject(mem,old);DeleteObject(face_small);
+                                        SelectObject(mem,old);
                                     }
                                     if !face_bold.is_null(){
                                         let old=SelectObject(mem,face_bold);
                                         SetTextColor(mem,0x00f7d5a1);
                                         let t=wide(&lines[1]);TextOutW(mem,95,82,t.as_ptr(),(t.len()-1) as i32);
-                                        SelectObject(mem,old);DeleteObject(face_bold);
+                                        SelectObject(mem,old);
                                     }
                                     let center=wide("C4");
                                     TextOutW(mem,36,72,center.as_ptr(),(center.len()-1) as i32);
@@ -964,11 +1001,9 @@ mod win {
                             });
                             // Present completed frame in a single GDI blit.
                             BitBlt(screen,0,0,w,h,mem,0,0,SRCCOPY);
-                            SelectObject(mem,old);
-                            DeleteObject(bmp);
+                            if let Some(bridge)=GLOBAL.get(){bridge.rendered_frames.fetch_add(1,Ordering::Relaxed);}
                         }
-                        DeleteDC(mem);
-                    }
+                    });
                 }
                 EndPaint(hwnd,&paint);0
             }
@@ -987,10 +1022,11 @@ mod win {
         let hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,class.as_ptr(),title.as_ptr(),WS_POPUP|WS_THICKFRAME,100,100,370,370,null_mut(),null_mut(),instance,null());
         if hwnd.is_null(){eprintln!("[overlay] CreateWindowExW failed");GdiplusShutdown(gdip);return;}
         if let Some(b)=GLOBAL.get(){b.hwnd.store(hwnd as isize,Ordering::Release);}
-        SetTimer(hwnd,1,16,null());
         // Initially hidden; browser exposes Open Mini Radar settings to show it.
         update_window(hwnd);
         let mut msg=Msg::default();while GetMessageW(&mut msg,null_mut(),0,0)>0{TranslateMessage(&msg);DispatchMessageW(&msg);}
+        FRAME_BUFFER.with(|buffer|buffer.borrow_mut().clear());
+        FONTS.with(|fonts|for (_,font) in fonts.borrow_mut().drain(){DeleteObject(font);});
         CACHE.with(|c|{let mut map=c.borrow_mut();if !map.image.is_null(){GdipDisposeImage(map.image);map.image=null_mut();}
             if let Some(path)=map.path.take(){let _=std::fs::remove_file(path);}});
         GdiplusShutdown(gdip);
@@ -1029,7 +1065,8 @@ mod win {
         let mut settings=OverlaySettings::default();let original=serde_json::to_value(&settings).unwrap();
         for patch in [json!({"show_hp":false,"text_size":40}),json!({"show_hp":"yes"}),json!({"marker_scale":0}),
             json!({"noise_opacity":101}),json!({"noise_color":"red"}),json!({"show_weapon_icon":null}),json!({"unknown":true}),
-            json!({"opacity":0}),json!({"opacity":9}),json!({"opacity":101}),json!({"opacity":50.5})]{
+            json!({"opacity":0}),json!({"opacity":9}),json!({"opacity":101}),json!({"opacity":50.5}),
+            json!({"max_fps":0}),json!({"max_fps":61}),json!({"max_fps":30.5})]{
             assert!(settings.update(&patch).is_err());assert_eq!(serde_json::to_value(&settings).unwrap(),original);
         }
     }

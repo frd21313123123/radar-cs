@@ -10,3 +10,10 @@ models, offline mode without a cached portrait, or failed downloads use a neutra
 silhouette; this is not the player's Steam profile avatar.
 
 Equipment icons are local SVG silhouettes in `src/icons.rs` and work offline.
+
+`schema-bundle.json` is a complete fallback for first launch without network
+access. Its offsets, client schema and build information were fetched together
+from [a2x/cs2-dumper revision 1005c258412a3657ac73ed1a9f84b9cbedddd876](https://github.com/a2x/cs2-dumper/tree/1005c258412a3657ac73ed1a9f84b9cbedddd876/output)
+(build 14192). The upstream MIT notice is in `schema_LICENSE.txt`. Runtime
+updates still resolve one immutable revision before fetching all three files;
+unrelated loose cache files are never combined into a schema.

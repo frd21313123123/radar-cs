@@ -10,6 +10,9 @@ pub struct HttpServer {
 impl HttpServer {
     pub fn serve(self)->Result<(),String>{
         let listener=TcpListener::bind((self.bind.as_str(),self.port)).map_err(|e|format!("Bind failed: {e}"))?;
+        self.serve_listener(listener)
+    }
+    pub fn serve_listener(self,listener:TcpListener)->Result<(),String>{
         let server=Arc::new(self);
         for conn in listener.incoming(){match conn{
             Ok(stream)=>{let ctx=server.clone();std::thread::spawn(move||{
@@ -22,8 +25,11 @@ impl HttpServer {
     }
 }
 fn respond(stream:&mut TcpStream,status:u16,body:&[u8],ctype:&str)->std::io::Result<()> {
+    respond_cached(stream,status,body,ctype,"no-store")
+}
+fn respond_cached(stream:&mut TcpStream,status:u16,body:&[u8],ctype:&str,cache:&str)->std::io::Result<()> {
     let status_text=match status{200=>"OK",400=>"Bad Request",403=>"Forbidden",404=>"Not Found",413=>"Payload Too Large",502=>"Bad Gateway",_=>"Error"};
-    let header=format!("HTTP/1.1 {status} {status_text}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n\r\n",body.len());
+    let header=format!("HTTP/1.1 {status} {status_text}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: {cache}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n\r\n",body.len());
     stream.write_all(header.as_bytes())?;stream.write_all(body)
 }
 fn reply_json(stream:&mut TcpStream,status:u16,v:Value)->std::io::Result<()>{let bytes=v.to_string();respond(stream,status,bytes.as_bytes(),"application/json; charset=utf-8")}
@@ -132,7 +138,12 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
         };
     }
     if method!="GET" {return reply_json(&mut stream,404,json!({"error":"not found"}));}
-    if query_arg(query,"token")!=Some(server.token.as_str()){return reply_json(&mut stream,403,json!({"error":"invalid access token"}));}
+    if query_arg(query,"token")!=Some(server.token.as_str()){
+        if path=="/"{
+            return respond(&mut stream,403,include_bytes!("../web/access.html"),"text/html; charset=utf-8");
+        }
+        return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+    }
     match path {
         "/"=>{
             // The EXE and its browser UI must always be the *same* release.
@@ -152,17 +163,17 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
         }
         "/api/weapon-icon"=>{
             let name=query_value(query,"weapon").unwrap_or_default();
-            respond(&mut stream,200,icons::weapon_icon(&name).as_bytes(),"image/svg+xml")
+            respond_cached(&mut stream,200,icons::weapon_icon(&name).as_bytes(),"image/svg+xml","private, max-age=86400")
         }
         "/api/agent-icon"=>{
             let model=query_value(query,"model").unwrap_or_default();
             match icons::agent_icon(&model,&server.cache,server.offline){
-                Some(bytes)=>respond(&mut stream,200,&bytes,"image/png"),
-                None=>respond(&mut stream,200,icons::NEUTRAL_AGENT.as_bytes(),"image/svg+xml"),
+                Some(bytes)=>respond_cached(&mut stream,200,&bytes,"image/png","private, max-age=86400"),
+                None=>respond_cached(&mut stream,200,icons::NEUTRAL_AGENT.as_bytes(),"image/svg+xml","private, max-age=30"),
             }
         }
         "/api/overlay"=>reply_json(&mut stream,200,server.overlay.status()),
-        "/api/bomb-icon"=>respond(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png"),
+        "/api/bomb-icon"=>respond_cached(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png","private, max-age=86400"),
         "/api/maps"=>{
             let maps=server.state.lock().map(|s|s.maps.clone()).map_err(|_|std::io::Error::other("poisoned state"))?;
             reply_json(&mut stream,200,maps)

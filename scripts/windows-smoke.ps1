@@ -66,7 +66,7 @@ public static class RadarSmokeWindow {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint msg,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
 }
 '@
-    $configured = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=55; show_hp=$false; show_hp_bar=$true;
+    $configured = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=55; max_fps=15; show_hp=$false; show_hp_bar=$true;
         show_weapon_icon=$true; show_weapon_name=$false; show_names=$true; show_armor=$true; marker_scale=1.2; text_size=14;
         noise_animation=$true; noise_color='#f2c477'; noise_opacity=65; noise_show_range=$true}
     Assert (!$configured.settings.show_hp -and $configured.settings.show_hp_bar -and !$configured.settings.show_weapon_name -and $configured.settings.show_armor) 'Detailed marker settings were not applied'
@@ -103,6 +103,12 @@ public static class RadarSmokeWindow {
         Start-Sleep -Milliseconds 100
     }
     Assert $rendered 'Native PNG background was not decoded and rendered'
+    $beforeRender = Request '/api/overlay'
+    Start-Sleep -Milliseconds 1100
+    $afterRender = Request '/api/overlay'
+    $newFrames = $afterRender.rendered_frames - $beforeRender.rendered_frames
+    Assert ($newFrames -gt 0 -and $newFrames -le 24) 'Native FPS limit was not applied'
+    Assert ($afterRender.buffer_allocations -eq $beforeRender.buffer_allocations) 'Native rendering allocated a fresh bitmap every frame'
     $style = [RadarSmokeWindow]::GetWindowLongPtr($hwnd,-16).ToInt64()
     Assert (($style -band 0x00C00000) -eq 0) 'Native window still has a Windows caption'
     $result = [UIntPtr]::Zero
@@ -116,6 +122,7 @@ public static class RadarSmokeWindow {
     Assert (!$saved.visible) 'Native close did not persist visibility'
     Assert (!$saved.show_hp -and $saved.show_names -and $saved.show_armor -and !$saved.show_weapon_name -and $saved.text_size -eq 14) 'Detailed settings were not persisted'
     Assert ($saved.opacity -eq 55) 'Window transparency was not persisted'
+    Assert ($saved.max_fps -eq 15) 'Native FPS setting was not persisted'
     $null = Request '/api/overlay' 'POST' @{visible=$true}
     for ($i=0; $i -lt 50 -and ![RadarSmokeWindow]::IsWindowVisible($hwnd); $i++) { Start-Sleep -Milliseconds 100 }
     Assert ([RadarSmokeWindow]::IsWindowVisible($hwnd)) 'Native reopen failed'

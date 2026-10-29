@@ -27,7 +27,7 @@ def check_noise(page):
         window.auditNoise=[];window.auditNoiseLabels=[];
         window.auditOriginalArc=ctx.arc;window.auditOriginalText=ctx.fillText;
         ctx.arc=function(x,y,r,...rest){
-            if(ctx.shadowBlur===9&&ctx.lineWidth===2)window.auditNoise.push({x,y,r,alpha:ctx.globalAlpha});
+            if(ctx.lineWidth===2&&ctx.strokeStyle===prefs.noiseColor.toLowerCase())window.auditNoise.push({x,y,r,alpha:ctx.globalAlpha});
             return window.auditOriginalArc.call(ctx,x,y,r,...rest);
         };
         ctx.fillText=function(text,...rest){
@@ -107,6 +107,9 @@ def check_settings(page, screenshots=None):
         assert not saved["show_utility_timers"]
         page.locator("#nativeSectionSelect").select_option("window")
         assert page.locator("#nativeOpacity").is_visible()
+        page.locator("#nativeMaxFps").evaluate("element=>{element.value='15';element.dispatchEvent(new Event('change',{bubbles:true}));}")
+        saved_ui()
+        assert saved["max_fps"] == 15
         page.locator("#nativeVisible").check()
         page.locator("#nativeZoom").evaluate("element=>{element.value='1.5';element.dispatchEvent(new Event('input',{bubbles:true}));element.dispatchEvent(new Event('change',{bubbles:true}));}")
         saved_ui()
@@ -137,6 +140,7 @@ def check_settings(page, screenshots=None):
         page.locator("#resetSettings").click()
         saved_ui()
         assert saved["opacity"] == defaults["opacity"] and saved["zoom"] == defaults["zoom"]
+        assert saved["max_fps"] == defaults["max_fps"]
         assert not saved["show_hp"], "Window reset changed player settings"
         assert page.locator("#nativeOpacityLabel").inner_text() == "0%"
         set_transparency(43)
@@ -161,3 +165,77 @@ def check_settings(page, screenshots=None):
         print("PASS: detailed mini-map controls, visible transparency, presets, save/reload, scoped reset, mobile layout and keyboard navigation")
     finally:
         page.unroute("**/api/overlay?*", overlay)
+
+
+def check_bomb_age(page):
+    value = page.evaluate("JSON.parse(JSON.stringify(snapshot))")
+    value.update(time=value["time"] + 1, age_secs=1.2, status="live")
+    value["bomb_timer"] = {"site": "B", "remaining_secs": 20, "total_secs": 40, "being_defused": True}
+    keep_fresh = True
+
+    def bomb_state(route):
+        if keep_fresh:
+            value["time"] += .01
+        route.fulfill(json=value)
+
+    page.route("**/api/state?*", bomb_state)
+    try:
+        page.wait_for_function("() => snapshot.age_secs===1.2&&$('bombTimerSite').textContent==='B'")
+        keep_fresh = False
+        page.wait_for_function("expected=>snapshot.time===expected", arg=value["time"])
+        initial = float(page.locator("#bombTimerSecs").inner_text())
+        assert 18 < initial <= 18.8, "Timer ignored source age or subtracted it twice"
+        page.wait_for_timeout(200)
+        current = float(page.locator("#bombTimerSecs").inner_text())
+        assert current < initial, "Repeated delivery of one snapshot reset the countdown"
+        value.pop("bomb_timer")
+        value.update(time=value["time"] + 1, age_secs=0)
+        page.wait_for_function("() => !snapshot.bomb_timer&&$('bombTimerPanel').hidden")
+        print("PASS: C4 accounts for source age, keeps counting on repeated samples, and clears on defuse/removal")
+    except Exception:
+        print("C4 test state:",page.evaluate("() => ({status:snapshot.status,age:snapshotAge(),sourceAge:snapshot.age_secs,bomb:snapshot.bomb_timer,hidden:document.hidden,enabled:prefs.showBombTimer,pollRunning,connectionError})"))
+        raise
+    finally:
+        page.unroute("**/api/state?*", bomb_state)
+
+
+def check_render_budget(browser, url):
+    # Use a fresh, unrouted context: Playwright routing disables the HTTP cache.
+    context = browser.new_context(viewport={"width": 1512, "height": 982})
+    page = context.new_page()
+    try:
+        page.goto(url)
+        page.wait_for_selector(".player")
+        page.evaluate("document.querySelectorAll('img').forEach(image=>image.loading='eager')")
+        page.wait_for_function("() => [...document.querySelectorAll('.equip-chip img,.card-primary img')].every(image=>image.complete)")
+        page.evaluate("performance.clearResourceTimings()")
+        for _ in range(3):
+            page.evaluate("() => {selected=selected===null?1:null;repaintPlayers();}")
+            page.wait_for_timeout(75)
+        page.wait_for_timeout(200)
+        assert page.evaluate("performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/weapon-icon')&&e.transferSize>0).length") == 0, "Repainting cards downloaded cached icons again"
+
+        page.locator("#settingsBtn").click()
+        page.locator("#settingsTabMap").click()
+        page.locator("#maxFps").evaluate("element=>{element.value='15';element.dispatchEvent(new Event('input',{bubbles:true}));}")
+        page.locator("#saveSettings").click()
+        page.evaluate("() => {window.auditPaints=0;const clear=ctx.clearRect.bind(ctx);ctx.clearRect=(...args)=>{window.auditPaints++;return clear(...args);};}")
+        start = page.evaluate("performance.now()")
+        page.wait_for_timeout(750)
+        elapsed = (page.evaluate("performance.now()") - start) / 1000
+        assert 0 < page.evaluate("window.auditPaints") <= 15 * elapsed + 2, "Renderer exceeded its saved frame budget"
+
+        page.evaluate("() => {Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));}")
+        page.wait_for_timeout(200)
+        before = page.evaluate("({frames:window.auditPaints,requests:performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/state')).length})")
+        page.wait_for_timeout(400)
+        after = page.evaluate("({frames:window.auditPaints,requests:performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/state')).length})")
+        assert before == after, "Hidden radar continued painting or polling"
+        page.evaluate("() => {delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));}")
+        page.wait_for_function("count=>window.auditPaints>count", arg=before["frames"])
+        page.wait_for_function("() => !connectionError&&!snapshotStale()")
+        page.reload()
+        page.wait_for_function("() => prefs.maxFps===15")
+        print("PASS: cached equipment, saved FPS limit, hidden-tab suspension and visible-tab recovery")
+    finally:
+        context.close()

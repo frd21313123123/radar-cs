@@ -12,3 +12,4 @@ pub mod state;
 pub mod tracker;
 pub mod icons;
 pub mod resolver;
+pub mod session;

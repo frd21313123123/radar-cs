@@ -30,7 +30,8 @@ impl SharedState {
     pub fn current_map(&self)->&str{self.manual_map.as_deref().unwrap_or(&self.map)}
     pub fn snapshot(&self)->Snapshot{
         let mut s=self.snap.clone();
-        s.expire_stale_data(crate::model::now_secs());
+        let now=crate::model::now_secs();s.expire_stale_data(now);
+        s.age_secs=if now.is_finite()&&s.time.is_finite(){(now-s.time).max(0.)}else{0.};
         s.game_map=self.current_map().into();
         s.game_map_source=if self.manual_map.is_some(){"manual".into()}else{self.map_source.clone()};
         if let Some(d)=s.diagnostics.as_object_mut(){
@@ -67,5 +68,11 @@ impl SharedState {
         assert!(expired.bomb_timer.is_none());assert!(expired.bomb_world.is_none());
         assert!(expired.radar_focus(true).is_none());assert_eq!(expired.source_hz,0.);
         assert!(!s.snap.players.is_empty(),"view expiry must not modify the producer's state");
+    }
+    #[test]fn snapshot_reports_source_age_without_changing_its_game_sample(){
+        let mut state=SharedState::new(fallback_maps());state.snap=crate::model::demo_snapshot(0.);
+        state.snap.time-=0.7;
+        let view=state.snapshot();assert!((0.7..1.0).contains(&view.age_secs));
+        assert_eq!(view.time,state.snap.time);assert_eq!(state.snap.age_secs,0.);
     }
 }

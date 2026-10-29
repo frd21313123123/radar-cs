@@ -163,11 +163,13 @@ impl CS2Reader {
         let node=self.schema.field("C_BaseEntity","m_pGameSceneNode").and_then(|off|try_u64(p,pawn+off));
         !health.is_some_and(|hp|(0..=200).contains(&hp))||!node.is_some_and(valid_pointer)
     }
-    fn game_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
-        let current=self.schema.offset("dwGlobalVars")
+    fn global_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
+        self.schema.offset("dwGlobalVars")
             .and_then(|offset|try_u64(p,base+offset)).filter(|v|valid_pointer(*v))
-            .and_then(|globals|try_f32(p,globals+0x30)).filter(|v|*v>0.&&*v<=86400.);
-        current.or_else(||self.controller_time(p,base))
+            .and_then(|globals|try_f32(p,globals+0x30)).filter(|v|*v>0.&&*v<=86400.)
+    }
+    fn game_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
+        self.global_time(p,base).or_else(||self.controller_time(p,base))
     }
     fn flash_state<M:Memory>(&self,p:&mut M,pawn:u64)->Option<bool>{
         // Overlay alpha is the current effect, whereas FlashDuration can
@@ -193,8 +195,11 @@ impl CS2Reader {
         if !valid_pointer(ptr){return false;}
         let field=|name:&str|self.schema.field("C_PlantedC4",name);
         if field("m_bBombTicking").and_then(|o|try_u8(p,ptr+o))!=Some(1){return false;}
-        if ["m_bBombDefused","m_bHasExploded"].iter().any(|name|
-            field(name).and_then(|o|try_u8(p,ptr+o))==Some(1)){return false;}
+        // If a reflected terminal flag cannot be read, its state is unknown.
+        // Never assume an unreadable defused/exploded flag means "still active".
+        for name in ["m_bBombDefused","m_bHasExploded"]{
+            if let Some(offset)=field(name){if try_u8(p,ptr+offset)!=Some(0){return false;}}
+        }
         let blow=field("m_flC4Blow").and_then(|o|try_f32(p,ptr+o));
         let total=field("m_flTimerLength").and_then(|o|try_f32(p,ptr+o));
         blow.is_some_and(|v|v>0.)&&total.is_some_and(|v|(10.0..=180.0).contains(&v))
@@ -221,10 +226,14 @@ impl CS2Reader {
         let total=try_f32(p,ptr+field("m_flTimerLength")?)?;
         let site=field("m_nBombSite").and_then(|o|try_i32(p,ptr+o)).unwrap_or(-1);
         let defusing=field("m_bBeingDefused").and_then(|o|try_u8(p,ptr+o))==Some(1);
-        // A real controller tick clock is useful when GlobalVars moved or
-        // is unreadable. Each clock must agree with the bomb's actual expiry.
-        [self.game_time(p,base),self.controller_time(p,base)].into_iter().flatten()
-            .find_map(|current|BombTimer::from_game_time(site,blow,current,total,defusing))
+        if let Some(current)=self.global_time(p,base){
+            // A dead/observing player's tick base can stop advancing. Once the
+            // global clock reaches detonation, that old clock must not revive C4.
+            if current>=blow{return None;}
+            if let Some(timer)=BombTimer::from_game_time(site,blow,current,total,defusing){return Some(timer);}
+        }
+        self.controller_time(p,base).and_then(|current|
+            BombTimer::from_game_time(site,blow,current,total,defusing))
     }
     fn planted_c4_timer<M:Memory>(&self,p:&mut M,base:u64)->Option<BombTimer>{
         let ptr=self.planted_pointer(p,base)?;
@@ -561,7 +570,9 @@ impl CS2Reader {
         diag.set("entity_list_initial_win32_error",json!(read_error));
         let secondary_unavailable=read.is_some_and(valid_pointer)&&
             (self.game_time(p,base).is_none()||self.current_map(p,base).is_none()||self.local_pawn_invalid(p,base));
-        if (!read.is_some_and(valid_pointer)||secondary_unavailable)
+        // Verified RVAs are static for this loaded client.dll. A temporarily
+        // absent map or spectator pawn must not scan its entire code again.
+        if !self.runtime_offsets&&(!read.is_some_and(valid_pointer)||secondary_unavailable)
             && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
             self.recovery_at=Some(Instant::now());
             diag.set("runtime_recovery_attempted",json!(true));
@@ -594,8 +605,6 @@ impl CS2Reader {
         let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
         let current_time=self.game_time(p,base);
-        let mut bomb_timer=self.planted_c4_timer(p,base);
-        diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
         diag.set("game_time_available",json!(current_time.is_some()));
         diag.set("map_memory_available",json!(self.current_map(p,base).is_some()));
         diag.set("local_controller_found",json!(if local!=0 {1}else{0}));
@@ -735,8 +744,6 @@ impl CS2Reader {
         if details {
             let (owner,world,ownerless,scanned)=self.scan_c4(p,list,base,&pawns);
             global_owner=owner;bomb_world=world;unowned=ownerless;
-            bomb_timer=self.planted_c4_timer(p,base);
-            diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
             diag.set("c4_entities_scanned",json!(scanned));
             diag.set("c4_world_found",json!(bomb_world.is_some()));
             diag.set("c4_on_ground",json!(bomb_world.as_ref().is_some_and(|b|b.status=="dropped")));
@@ -750,6 +757,10 @@ impl CS2Reader {
         diag.set("observer_target_found",json!(observer_view.is_some()));
         diag.set("observer_mode",json!(observer_view.as_ref().map(|v|v.mode)));
         let grenades=if grenade_scan{self.scan_grenades(p,list,base,current_time,&mut diag)}else{vec![]};
+        // Sample C4 after the expensive entity scans so its remaining time
+        // corresponds to the timestamp published with this snapshot.
+        let bomb_timer=self.planted_c4_timer(p,base);
+        diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
         let mut players:Vec<Player>=pawns.into_values().collect();players.sort_by_key(|p|p.id);
         diag.set("c4_global_owner_found",json!(if global_owner.is_some(){1}else{0}));
         diag.set("c4_global_unowned",json!(if unowned {1}else{0}));
@@ -767,6 +778,7 @@ impl CS2Reader {
         diag.set("read_attempts",json!(p.read_count()-before_read));diag.set("read_failures",json!(p.fail_count()-before_fail));
         diag.set("last_win32_error",json!(p.last_error()));diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
+        diag.set("offsets_revision",self.schema.info["revision"].clone());
         let build=if engine!=0{self.schema.engine_offset("dwBuildNumber").and_then(|o|try_i32(p,engine+o)).filter(|b|*b>0)}else{None};
         diag.set("game_build",json!(build));
         let same=build.and_then(|b|self.schema.info["build_number"].as_u64().map(|v|v==b as u64));
@@ -877,6 +889,20 @@ mod bomb_read_tests {
         assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
         assert_eq!(r.scan_c4(&mut p,0x20000,0x70000,&BTreeMap::new()).1.unwrap().status,"planted");
         assert_eq!(r.planted_c4_timer(&mut p,0x70000).unwrap().remaining_secs,25.);
+    }
+    #[test]fn an_expired_bomb_is_not_revived_by_a_spectators_frozen_tick_base(){
+        let (r,mut p)=planted_fixture(true);
+        p.put(0x70000+16,&0x90000u64.to_le_bytes());p.put(0x90100,&6400i32.to_le_bytes());
+        for current in [125f32,126.,140.]{
+            p.put(0x80030,&current.to_le_bytes());assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+        }
+    }
+    #[test]fn terminal_bomb_flags_must_be_read_successfully(){
+        let (r,mut p)=planted_fixture(true);
+        p.put(0xb0110,&[1]);assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+        p.put(0xb0110,&[0,1]);assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+        p.put(0xb0110,&[0,0]);assert!(r.planted_c4_timer(&mut p,0x70000).is_some());
+        p.mem.remove(&0xb0110);assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
     }
     #[test]fn current_map_reads_only_the_validated_global_slot_and_short_string(){
         let (r,mut p)=planted_fixture(true);
@@ -1055,6 +1081,14 @@ mod bomb_read_tests {
   let s=r.snapshot(&mut p,BASE,0,2,false,false).unwrap();
   assert_eq!(s.players.len(),1);assert_eq!(r.schema.offset("dwEntityList"),Some(8));
   assert_eq!(s.diagnostics["runtime_offsets_verified"],false);
+ }
+ #[test]fn verified_module_offsets_are_not_rescanned_for_a_temporary_missing_map(){
+  let mut r=reader();let mut p=initial();r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  r.runtime_offsets=true;r.recovery_at=Some(Instant::now()-Duration::from_secs(60));
+  let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.players.len(),1);assert_eq!(s.diagnostics["map_memory_available"],false);
+  assert!(s.diagnostics.get("runtime_recovery_attempted").is_none());
+  assert_eq!(s.diagnostics["runtime_offsets_verified"],true);
  }
  #[test]fn skinned_knives_are_still_knives(){
   for id in [42,59,500,503,505,507,512,515,520,523,525,526]{assert_eq!(weapon_name(id),"Knife");}

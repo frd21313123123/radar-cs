@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import Thread
 
 from playwright.sync_api import sync_playwright
-from browser_features import check_noise, check_settings
+from browser_features import check_noise, check_settings, check_bomb_age, check_render_budget
 
 
 class StalledJSON(BaseHTTPRequestHandler):
@@ -168,6 +168,8 @@ def check_browser(url, executable, screenshots=None):
             print("PASS: hung requests time out, polling retries, and live data recovers")
             check_noise(a)
             check_settings(a, screenshots)
+            check_bomb_age(a)
+            check_render_budget(browser, url)
             assert not errors, errors
             print("PASS: no browser JavaScript errors")
         finally:

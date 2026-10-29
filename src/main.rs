@@ -1,7 +1,7 @@
 use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,grenade::GrenadeTracker,noise::NoiseTracker,overlay::OverlayController};
 use serde_json::json;
-use std::{collections::HashMap,env,fs,path::{Path,PathBuf},sync::{Arc,Mutex},thread,time::{Duration,Instant}};
-use rand::{rngs::OsRng,RngCore};
+use std::{collections::HashMap,env,fs,net::TcpListener,path::{Path,PathBuf},sync::{Arc,Mutex},thread,time::{Duration,Instant}};
+use cas_external_radar::session::{self,random_token};
 
 #[derive(Default)]struct Args {demo:bool,lan:bool,offline:bool,refresh:bool,no_browser:bool,no_gsi_install:bool,
     port:u16,cfg:Option<PathBuf>}
@@ -16,16 +16,16 @@ fn parse_args()->Result<Args,String>{
         _=>return Err(format!("Unknown option {arg}")),
     }}Ok(a)
 }
-fn random_token(bytes:usize)->String{
-    let mut buf=vec![0u8;bytes];OsRng.fill_bytes(&mut buf);
-    // URL-safe hex, cryptographic RNG, no punctuation in HTML query.
-    buf.iter().map(|x|format!("{x:02x}")).collect()
-}
 fn exe_root()->PathBuf{
     let cwd=env::current_dir().unwrap_or_else(|_|PathBuf::from("."));
     if cwd.join("web/index.html").is_file(){cwd}else{env::current_exe().ok().and_then(|p|p.parent().map(Path::to_path_buf)).unwrap_or(cwd)}
 }
 fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,cache:PathBuf){
+    #[cfg(windows)] unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread,SetThreadPriority,THREAD_PRIORITY_BELOW_NORMAL};
+        // The background reader must yield CPU time to the game's main threads.
+        SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+    }
     let target=Duration::from_nanos(1_000_000_000/60);
     let begin=Instant::now();let mut proc=WinProcess::new();
     let mut reader=schema.map(CS2Reader::new);
@@ -44,6 +44,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     let mut last_msg=String::new();
     loop {
         let tick=Instant::now();
+        let mut interval=target;
         if demo {
             let mut s=demo_snapshot(begin.elapsed().as_secs_f64());noise_tracker.update(&mut s,Instant::now(),"de_mirage");
             if let Ok(mut st)=state.lock(){st.set_map("de_mirage","demo");st.snap=s;}
@@ -110,6 +111,11 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                     proc.close();tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();failed
                 },
             };
+            // Reopening CS2 and enumerating its modules at 60 Hz while loading
+            // or disconnected only consumes CPU; recovery can poll at 4 Hz.
+            if matches!(snap.status.as_str(),"waiting"|"error"|"no_players"|"starting"){
+                interval=Duration::from_millis(250);
+            }
             if snap.status!="live"{
                 let msg=format!("{}: {:?}",snap.status,snap.message);
                 if last_msg!=msg||last_log.elapsed()>Duration::from_secs(10){
@@ -121,7 +127,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
             }
             if let Ok(mut st)=state.lock(){st.snap=snap;}
         }
-        if tick.elapsed()<target{thread::sleep(target-tick.elapsed());}
+        if let Some(remaining)=interval.checked_sub(tick.elapsed()){thread::sleep(remaining);}
     }
 }
 fn browser(url:&str){
@@ -132,11 +138,34 @@ fn main(){if let Err(e)=start(){eprintln!("ERROR: {e}");std::process::exit(1);}}
 fn start()->Result<(),String>{
     let args=parse_args()?;
     let root=exe_root();let cache=root.join("cache");fs::create_dir_all(&cache).map_err(|e|e.to_string())?;
+    // Reserve the port before starting workers or opening a browser. A second
+    // launch must never send a new token to an older server on the same port.
+    let bind=if args.lan {"0.0.0.0"}else{"127.0.0.1"};
+    let listener=match TcpListener::bind((bind,args.port)){
+        Ok(listener)=>listener,
+        Err(error)=>{
+            if error.kind()==std::io::ErrorKind::AddrInUse{
+                if let Some(token)=session::read_access_token(&cache){
+                    let url=format!("http://127.0.0.1:{}/?token={token}",args.port);
+                    let status=ureq::get(&format!("http://127.0.0.1:{}/api/overlay?token={token}",args.port))
+                        .timeout(Duration::from_secs(2)).call().ok().and_then(|r|r.into_string().ok())
+                        .and_then(|body|serde_json::from_str::<serde_json::Value>(&body).ok());
+                    if status.is_some_and(|s|s["settings"].is_object()&&s["supported"].is_boolean()){
+                        println!("CAS Radar уже запущен.\n  PC: {url}");
+                        if !args.no_browser{browser(&url);}return Ok(());
+                    }
+                }
+                return Err(format!("Порт {} уже занят. Закройте предыдущий радар или выберите другой порт через --port.",args.port));
+            }
+            return Err(format!("Не удалось запустить сервер: {error}"));
+        }
+    };
+    let token=session::access_token(&cache)?;
     let maps=assets::load_maps(&cache,args.offline,args.refresh);
     let schema=if args.demo {None}else {match assets::load_schema(&cache,args.offline){
         Ok(schema)=>Some(schema),Err(error)=>{eprintln!("[schema] {error}");None}
     }};
-    let token=random_token(24);let secret_path=cache.join("gsi_token.txt");
+    let secret_path=cache.join("gsi_token.txt");
     let gsi_token=fs::read_to_string(&secret_path).ok().map(|s|s.trim().to_string()).filter(|s|s.len()>25)
         .unwrap_or_else(||{let n=random_token(32);let _=fs::write(&secret_path,&n);n});
     if !args.demo&&!args.no_gsi_install{
@@ -149,12 +178,12 @@ fn start()->Result<(),String>{
     let worker=state.clone();let demo=args.demo;let worker_cache=cache.clone();
     thread::spawn(move||reader_worker(worker,schema,demo,worker_cache));
     let overlay=OverlayController::spawn(state.clone(),cache.clone(),args.offline);
-    let server=HttpServer {bind:if args.lan {"0.0.0.0"}else{"127.0.0.1"}.into(),port:args.port,
+    let server=HttpServer {bind:bind.into(),port:args.port,
         token:token.clone(),gsi_token,cache:root.join("cache"),offline:args.offline,
         html:root.join("web/index.html"),state,overlay};
     let url=format!("http://127.0.0.1:{}/?token={}",args.port,token);
     println!("\nCAS EXTERNAL RADAR — RUST / read-only / no injection\n  PC: {url}\n");
     if args.lan {println!("  LAN: replace 127.0.0.1 with your PC's LAN IPv4, keep entire token.\n  Do not forward this port to the Internet.");}
     if !args.no_browser{browser(&url);}
-    server.serve()
+    server.serve_listener(listener)
 }

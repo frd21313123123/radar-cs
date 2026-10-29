@@ -5,9 +5,10 @@ use crate::schema::Schema;
 use serde::{Deserialize,Serialize};
 
 const SCHEMA_REVISION_URL:&str="https://api.github.com/repos/a2x/cs2-dumper/commits?path=output&per_page=1";
+const SCHEMA_GIT_REFS_URL:&str="https://github.com/a2x/cs2-dumper.git/info/refs?service=git-upload-pack";
 pub const MAP_SRC:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/data/available.json";
 pub const RADARS:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/images/radars/";
-const UA:&str="CAS-External-Radar-Rust/0.9";
+const UA:&str=concat!("CAS-External-Radar-Rust/",env!("CARGO_PKG_VERSION"));
 
 fn download_agent()->Result<ureq::Agent,String>{
     use ureq::rustls::{self,pki_types::{CertificateDer,pem::PemObject}};
@@ -63,13 +64,39 @@ impl SchemaBundle{
         if !self.info["build_number"].as_u64().is_some_and(|n|n>0){
             return Err("Missing schema build number".into());
         }
-        Schema::from_json(&self.offsets,&self.client,self.info.clone())
+        let mut info=self.info.clone();info["revision"]=json!(self.revision);
+        Schema::from_json(&self.offsets,&self.client,info)
     }
 }
+/// Git's read-only ref advertisement has its own availability/rate limits;
+/// parsing it needs neither a Git installation nor an authenticated REST call.
+fn git_main_revision(mut bytes:&[u8])->Option<String>{
+    if bytes.len()>262144{return None;}
+    let mut found=None;
+    while !bytes.is_empty(){
+        let length=usize::from_str_radix(std::str::from_utf8(bytes.get(..4)?).ok()?,16).ok()?;
+        if length==0{bytes=&bytes[4..];continue;}
+        if length<4||length>bytes.len(){return None;}
+        let packet=std::str::from_utf8(&bytes[4..length]).ok()?;
+        if let Some((sha,name))=packet.split_once(' '){
+            if name.split(['\0','\n']).next()==Some("refs/heads/main"){
+                if sha.len()!=40||!sha.bytes().all(|b|b.is_ascii_hexdigit())||found.is_some(){return None;}
+                found=Some(sha.to_owned());
+            }
+        }
+        bytes=&bytes[length..];
+    }
+    found
+}
 fn fetch_schema_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
-    let commits=fetch(SCHEMA_REVISION_URL)?;
-    let revision=commits[0]["sha"].as_str().filter(|sha|
-        sha.len()==40&&sha.bytes().all(|b|b.is_ascii_hexdigit())).ok_or("Missing schema commit")?.to_owned();
+    let revision=fetch(SCHEMA_REVISION_URL).and_then(|commits|{
+        commits[0]["sha"].as_str().filter(|sha|sha.len()==40&&sha.bytes().all(|b|b.is_ascii_hexdigit()))
+            .map(str::to_owned).ok_or_else(||"Missing schema commit".to_owned())
+    }).or_else(|api_error|{
+        fetch(SCHEMA_GIT_REFS_URL).and_then(|refs|
+            refs.as_str().and_then(|s|git_main_revision(s.as_bytes())).ok_or_else(||"Missing Git main revision".to_owned()))
+            .map_err(|git_error|format!("{api_error}; Git revision unavailable: {git_error}"))
+    })?;
     let base=format!("https://raw.githubusercontent.com/a2x/cs2-dumper/{revision}/output");
     let bundle=SchemaBundle{revision,offsets:fetch(&format!("{base}/offsets.json"))?,
         client:fetch(&format!("{base}/client_dll.json"))?,info:fetch(&format!("{base}/info.json"))?};
@@ -90,14 +117,26 @@ fn load_schema_with(cache:&Path,offline:bool,mut fetch:impl FnMut(&str)->Result<
                 }
                 return Ok(schema);
             }
-            Err(error)=>eprintln!("[schema] Complete update unavailable: {error}; using the previous complete bundle"),
+            Err(error)=>eprintln!("[schema] Complete update unavailable: {error}; using a complete local bundle"),
         }
     }
-    previous.ok_or_else(||"No valid offsets bundle; connect once to download a consistent schema-bundle.json".into())
+    if let Some(schema)=previous{return Ok(schema);}
+    // First launch must also work when the public GitHub API is rate limited
+    // and there has never been a downloadable cache on this installation.
+    let bytes=include_bytes!("../assets/schema-bundle.json");
+    let bundle:SchemaBundle=serde_json::from_slice(bytes).map_err(|e|e.to_string())?;
+    let mut schema=bundle.schema()?;schema.info["source"]=json!("bundled");
+    let _=fs::create_dir_all(cache);
+    let temporary=path.with_extension(format!("{}.part",std::process::id()));
+    if fs::write(&temporary,bytes).is_ok(){if fs::rename(&temporary,&path).is_err(){let _=fs::remove_file(temporary);}}
+    eprintln!("[schema] Using bundled complete schema, build {}",schema.info["build_number"]);
+    Ok(schema)
 }
 pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
     load_schema_with(cache,offline,|url|download(url,2_000_000)
-        .and_then(|bytes|serde_json::from_slice(&bytes).map_err(|e|e.to_string())))
+        .and_then(|bytes|if url==SCHEMA_GIT_REFS_URL{
+            String::from_utf8(bytes).map(Value::String).map_err(|e|e.to_string())
+        }else{serde_json::from_slice(&bytes).map_err(|e|e.to_string())}))
 }
 
 #[cfg(test)]mod schema_bundle_tests{
@@ -157,8 +196,37 @@ pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
         for (name,value) in [("offsets",old.offsets),("client_dll",old.client),("info",old.info)]{
             fs::write(cache.join(format!("{name}.json")),value.to_string()).unwrap();
         }
-        assert!(load_schema_with(&cache,true,|_|panic!("offline network request")).is_err());
+        let loaded=load_schema_with(&cache,true,|_|panic!("offline network request")).unwrap();
+        assert_eq!(loaded.info["source"],"bundled");assert_ne!(loaded.info["build_number"],101);
         fs::remove_dir_all(cache).unwrap();
+    }
+    fn advertisement(sha:&str)->String{
+        let payload=format!("{sha} refs/heads/main\n");format!("{:04x}{payload}0000",payload.len()+4)
+    }
+    #[test]fn api_403_uses_the_public_git_revision_and_keeps_documents_pinned(){
+        let cache=cache();let bundle=fixture("b",102,36);let revision=bundle.revision.clone();
+        let mut documents=remote(bundle,None);let mut urls=Vec::new();
+        let schema=load_schema_with(&cache,false,|url|{
+            urls.push(url.to_owned());
+            if url==SCHEMA_REVISION_URL{Err("HTTP 403".into())}
+            else if url==SCHEMA_GIT_REFS_URL{Ok(Value::String(advertisement(&revision)))}
+            else{documents(url)}
+        }).unwrap();
+        assert_eq!(schema.info["build_number"],102);assert_eq!(urls.len(),5);
+        assert!(urls.iter().skip(2).all(|url|url.contains(&format!("/{revision}/output/"))));
+        fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn clean_first_launch_has_a_valid_bundle_even_when_both_network_sources_fail(){
+        let cache=cache();let schema=load_schema_with(&cache,false,|_|Err("HTTP 403".into())).unwrap();
+        assert_eq!(schema.info["source"],"bundled");assert!(schema.offset("dwEntityList").is_some());
+        let saved:SchemaBundle=serde_json::from_slice(&fs::read(cache.join("schema-bundle.json")).unwrap()).unwrap();
+        assert!(saved.schema().is_ok());assert_eq!(schema.info["revision"],saved.revision);
+        fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn invalid_git_advertisements_cannot_select_a_revision(){
+        assert_eq!(git_main_revision(advertisement(&"a".repeat(40)).as_bytes()),Some("a".repeat(40)));
+        for invalid in ["ffffbroken".to_owned(),advertisement(&"g".repeat(40)),advertisement(&"a".repeat(39)),
+            advertisement(&"a".repeat(40)).replace("heads/main","heads/test")]{assert!(git_main_revision(invalid.as_bytes()).is_none());}
     }
 }
 /// Normalized positions taken from CS2 overview metadata (October 2026).

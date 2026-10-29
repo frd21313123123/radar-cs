@@ -125,6 +125,8 @@ pub struct Snapshot {
     pub details_read: bool,
     pub diagnostics: Value,
     pub time: f64,
+    /// Producer age measured on the server, independent of a LAN client's clock.
+    #[serde(default)] pub age_secs:f64,
     pub source_hz: f64,
     pub target_hz: u32,
     pub message: Option<String>,
@@ -206,7 +208,7 @@ impl Snapshot {
             status: status.to_owned(), pid: 0, local_team: 0, players: Vec::new(), observer_view:None,
             bomb_carrier_id: None, bomb_world: None, bomb_timer:None, grenades:Vec::new(), grenades_read:false, bomb_carrier_source: None, c4_unowned: false,
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
-            time: now_secs(), source_hz: 0., target_hz: 60,
+            time: now_secs(), age_secs:0., source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
             game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,noise_events:vec![],
         }
