@@ -66,7 +66,7 @@ impl NoiseTracker{
                 (old.weapon==m.weapon&&matches!((old.shots_fired,m.shots_fired),(Some(a),Some(b)) if b>a&&b>0));
             let emitted=increased(old.emit_sound_time,m.emit_sound_time);
             let landed=old.on_ground==Some(false)&&m.on_ground==Some(true);
-            let impact=old.vertical_speed.unwrap_or(0.).abs().max(old.fall_velocity.unwrap_or(0.).abs());
+            let impact=(-old.vertical_speed.unwrap_or(0.)).max(0.).max(old.fall_velocity.unwrap_or(0.).max(0.));
             let can_step=m.on_ground==Some(true)&&m.walking!=Some(true)&&m.ducking!=Some(true);
             if shot{
                 if let Some(radius)=shot_radius(m){event=Some((if radius==SILENCED_RADIUS{"silenced_shot"}else{"shot"},radius));}
@@ -167,6 +167,13 @@ impl NoiseTracker{
         s.local_motion.as_mut().unwrap().on_ground=Some(true);s.local_motion.as_mut().unwrap().vertical_speed=Some(0.);
         tracker.update(&mut s,at+Duration::from_millis(500),"de_nuke");
         assert_eq!(s.noise.as_ref().unwrap().kind,"landing");assert_eq!(s.noise.as_ref().unwrap().radius_units,1100.);
+    }
+    #[test]fn air_to_ground_while_moving_up_is_not_a_landing(){
+        let mut tracker=NoiseTracker::default();let at=Instant::now();let mut s=sample();
+        s.local_motion.as_mut().unwrap().on_ground=Some(false);s.local_motion.as_mut().unwrap().vertical_speed=Some(300.);
+        tracker.update(&mut s,at,"de_nuke");
+        s.local_motion.as_mut().unwrap().on_ground=Some(true);s.local_motion.as_mut().unwrap().vertical_speed=Some(0.);
+        tracker.update(&mut s,at+Duration::from_millis(100),"de_nuke");assert!(s.noise_events.is_empty());
     }
     #[test]fn respawn_and_missing_local_data_clear_pending_sounds(){
         let mut t=NoiseTracker::default();let now=Instant::now();let mut s=sample();t.update(&mut s,now,"de_nuke");
