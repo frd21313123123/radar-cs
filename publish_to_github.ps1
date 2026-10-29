@@ -53,16 +53,20 @@ if (-not $exists) {
 } else {
     Write-Host "Repository exists: $fullName" -ForegroundColor Yellow
 }
-# Always bind the actual push destination to the requested repository, including
-# an existing checkout and the create-new-repository path. An explicit pushurl
-# would override the ordinary origin URL, so remove every such override too.
-$remoteUrl = "https://github.com/$fullName.git"
-& git remote get-url origin *> $null
-if ($LASTEXITCODE -eq 0) { & git remote set-url origin $remoteUrl }
+# Retain HTTPS/SSH authentication routes only when they address the requested
+# repository. Replace all URL entries so extra push destinations cannot survive.
+$requested = '^(?:https://(?:[^/@]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)' + [regex]::Escape($fullName) + '(?:\.git)?/?$'
+$originUrls = @(& git config --get-all remote.origin.url)
+$pushUrls = @(& git config --get-all remote.origin.pushurl)
+$remoteUrl = $originUrls | Where-Object { $_ -match $requested } | Select-Object -First 1
+if (!$remoteUrl) { $remoteUrl = "https://github.com/$fullName.git" }
+$pushUrl = $pushUrls | Where-Object { $_ -match $requested } | Select-Object -First 1
+if (!$pushUrl) { $pushUrl = $remoteUrl }
+if ($originUrls.Count -gt 0) { & git config --replace-all remote.origin.url $remoteUrl }
 else { & git remote add origin $remoteUrl }
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure the requested GitHub remote' }
-& git config --unset-all remote.origin.pushurl
-if ($LASTEXITCODE -notin @(0,5)) { throw 'Could not clear an overriding push destination' }
+& git config --replace-all remote.origin.pushurl $pushUrl
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure the requested push destination' }
 & git branch -M main
 if ($LASTEXITCODE -ne 0) { throw 'Could not select main branch' }
 & git push -u origin main
