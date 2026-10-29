@@ -17,7 +17,10 @@ try {
         $process.Refresh()
         if ($process.HasExited) { throw 'Radar exited during startup' }
         if (Test-Path "$work/stdout.log") {
-            $log = [IO.File]::ReadAllText("$work/stdout.log")
+            # Start-Process is still writing; explicitly allow its write handle.
+            $stream = [IO.File]::Open("$work/stdout.log",[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+            $reader = [IO.StreamReader]::new($stream)
+            try { $log = $reader.ReadToEnd() } finally { $reader.Dispose() }
             if ($log -match 'token=([0-9a-f]+)') { $token=$Matches[1]; break }
         }
         Start-Sleep -Milliseconds 100
