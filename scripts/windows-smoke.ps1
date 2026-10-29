@@ -65,7 +65,18 @@ public static class RadarSmokeWindow {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint msg,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
 }
 '@
-    $null = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=100}
+    $configured = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=100; show_hp=$false; show_hp_bar=$true;
+        show_weapon_icon=$true; show_weapon_name=$false; show_names=$true; show_armor=$true; marker_scale=1.2; text_size=14;
+        noise_animation=$true; noise_color='#f2c477'; noise_opacity=65; noise_show_range=$true}
+    Assert (!$configured.settings.show_hp -and $configured.settings.show_hp_bar -and !$configured.settings.show_weapon_name -and $configured.settings.show_armor) 'Detailed marker settings were not applied'
+    Assert ($configured.defaults.show_hp -and $configured.defaults.show_weapon_name) 'Settings defaults missing'
+    $heard = $null
+    for ($i=0; $i -lt 60; $i++) {
+        $events = @((Request '/api/state').noise_events)
+        if ($events.Count -gt 0 -and $events[0].radius_units -eq 1100) { $heard=$events[0]; break }
+        Start-Sleep -Milliseconds 50
+    }
+    Assert ($null -ne $heard -and $heard.position.Count -eq 3 -and $heard.duration_ms -gt 0) 'Sound impulses missing'
     $hwnd = [IntPtr]::Zero
     for ($i=0; $i -lt 100; $i++) {
         $hwnd = [RadarSmokeWindow]::RadarWindow()
@@ -91,6 +102,7 @@ public static class RadarSmokeWindow {
     Assert (!(Request '/api/overlay').settings.visible) 'Native close did not update shared settings'
     $saved = Get-Content "$work/cache/overlay_settings.json" -Raw | ConvertFrom-Json
     Assert (!$saved.visible) 'Native close did not persist visibility'
+    Assert (!$saved.show_hp -and $saved.show_names -and $saved.show_armor -and !$saved.show_weapon_name -and $saved.text_size -eq 14) 'Detailed settings were not persisted'
     $null = Request '/api/overlay' 'POST' @{visible=$true}
     for ($i=0; $i -lt 50 -and ![RadarSmokeWindow]::IsWindowVisible($hwnd); $i++) { Start-Sleep -Milliseconds 100 }
     Assert ([RadarSmokeWindow]::IsWindowVisible($hwnd)) 'Native reopen failed'

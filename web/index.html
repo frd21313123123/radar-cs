@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAS Radar Rust v1.9 — External Telemetry</title>
+<title>CAS Radar Rust v1.10 — External Telemetry</title>
 <style>
 :root{color-scheme:dark;--bg:#080c12;--shell:#0d121b;--panel:#111924;--line:#24303d;--sub:#8998a9;--ink:#eef5f6;--aqua:#78f5d2;--orange:#ffb566;--red:#ff6f78;--ct:#72b9ff;--t:#ff9e74;--friend:#3b82f6;--enemy:#ef4444;--own:#22c55e}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 15% -15%,#123046 0%,transparent 38%),var(--bg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink);letter-spacing:.01em;overflow:hidden}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--aqua);outline-offset:2px}
@@ -142,13 +142,22 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 .telemetry-key b{font-size:12px;color:#f3f8fb}.legend{height:auto;min-height:50px;padding-top:8px;padding-bottom:8px}
 @media(max-width:1150px){.card-name{max-width:115px}.card-avatar{width:35px;height:42px}.card-health{font-size:15px}.card-primary img{width:37px}}
 @media(max-width:800px){.player .card-avatar{display:grid}.telemetry-key{gap:6px 10px}.card-name{max-width:none}.legend .hint{display:none}}
+
+/* Settings keep navigation and actions visible while the selected section scrolls. */
+.settings-box{width:min(620px,calc(100vw - 24px));max-height:calc(100dvh - 32px);padding:20px;gap:14px;overflow:hidden;background:linear-gradient(160deg,#152332,#101923);border-color:#354959;box-shadow:0 24px 100px #000b}
+.settings-heading{display:flex;justify-content:space-between;align-items:center;gap:16px}.settings-heading h2{margin-top:6px;font-size:22px}
+.settings-tabs{display:flex;gap:5px;border-bottom:1px solid #2b3b49;padding-bottom:8px;flex-shrink:0}.settings-tab{flex:1;border:1px solid transparent;background:transparent;border-radius:7px;padding:10px 8px;color:#91a7b8;font-size:13px;font-weight:700;cursor:pointer}.settings-tab.active{background:#203e3c;color:#a5f9df;border-color:#396259}.settings-tab:hover{background:#20303c}
+.settings-body{min-height:0;overflow-y:auto;padding-right:8px;scrollbar-width:thin;scrollbar-color:#3a5362 transparent}.settings-pane{display:flex;flex-direction:column;gap:8px}.settings-pane[hidden],.native-group[hidden]{display:none!important}.settings-note{margin-bottom:9px!important;color:#9cafbd!important}.settings-row{min-height:35px;font-size:13px;gap:12px}.settings-row input[type=checkbox]{flex:0 0 18px;accent-color:#78dcb9}.settings-row select{max-width:65%;font-size:12px}.range-row{display:block;padding:8px 0}.range-row>span{display:flex;justify-content:space-between;align-items:center}.range-row output{font-size:12px;color:#a5f9df;font-variant-numeric:tabular-nums}.range-row input[type=range]{display:block;width:100%;margin:12px 0 2px;accent-color:#78dcb9}
+.native-group{display:flex;flex-direction:column;gap:7px}.toggle-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 22px}.settings-presets{display:flex;align-items:center;gap:7px;padding:8px 0}.settings-presets>span{font-size:12px;color:#8fa4b4;margin-right:auto}.settings-presets .small-btn{font-size:11px;padding:7px 10px}
+.settings-pane fieldset{border:1px solid #2b4252;border-radius:9px;margin:5px 0;padding:11px 14px;min-width:0}.settings-pane legend{font-size:12px;color:#bcdbdf;padding:0 5px;font-weight:700}.sound-summary{display:flex;gap:12px;margin-bottom:9px}.sound-summary span{flex:1;display:flex;flex-direction:column;gap:7px;background:#172933;border:1px solid #2b434b;border-radius:8px;padding:12px;color:#93aab7;font-size:12px}.sound-summary b{font-size:19px;color:#f2d69d}.settings-footer{border-top:1px solid #2b3b49;padding-top:12px;flex-shrink:0}.settings-footer>span{display:block;color:#829aa9;font-size:11px;margin-bottom:10px}.settings-actions{gap:10px}.settings-box button:disabled,.settings-box input:disabled{opacity:.4;cursor:not-allowed}
+@media(max-width:520px){.toggle-grid{grid-template-columns:1fr}.settings-box{padding:15px}.settings-row select{max-width:61%}.settings-tabs{gap:3px}.settings-tab{font-size:12px}.settings-presets{flex-wrap:wrap}.settings-presets>span{flex-basis:100%}}
 </style></head>
 <body><div class="layout">
 <header><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/></svg></div><div><div class="brand-name">CAS<span style="color:var(--aqua)">.</span>RADAR</div><div class="brand-caption">EXTERNAL <strong>READ-ONLY</strong> TELEMETRY</div></div></div><div class="pills"><div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">CONNECTING</span></div><div class="pill demo" id="demoPill" style="display:none">SIMULATION MODE</div><div class="pill"><span>PLAYERS</span><b id="playerCount">00</b></div><div class="pill mono" title="Фактическая частота отрисовки / чтения данных"><b id="fpsHud">FPS —</b><span id="sourceHud">DATA — Hz</span></div></div></header>
 <main><aside class="side-column side-t" aria-label="Террористы">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on t" id="tButton">TERRORISTS <span class="number" id="tCount">0</span></button></div><input class="filter" id="search" placeholder="Поиск по игрокам…" autocomplete="off"></div>
 <div class="team-status" id="tStatus">Состав команды · T</div><div id="tPlayers" class="players"></div>
-</aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Карта не определена</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="">Выберите карту…</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select" disabled><option value="default">Этаж</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
+</aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Карта не определена</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="">Выберите карту…</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select" disabled><option value="default">Этаж</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки радара">⚙ Настройки</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
 <div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar" role="img" aria-label="Карта игроков: ХП, оружие, стрелки высоты и белый крест ослепления. Данные каждого игрока доступны в карточках по сторонам."></canvas>
 <div class="bomb-countdown" id="bombTimerPanel" hidden aria-label="Время до взрыва C4">
   <div class="bomb-ring"><svg viewBox="0 0 48 48" aria-hidden="true">
@@ -162,42 +171,34 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
 </aside></main>
-<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.9</span></footer></div>
+<footer><span><strong id="liveInd">●</strong> <span id="footerText">ENGINE STANDBY</span></span><span class="mono optional">MEMORY READER → HTTP → BROWSER</span><span class="mono">CAS / RUST v1.10</span></footer></div>
 <div class="settings-backdrop" id="settingsBackdrop" hidden role="presentation">
  <div class="settings-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-  <div style="display:flex;justify-content:space-between;align-items:center"><h2 id="settingsTitle">⚙ Настройки радара</h2><button id="closeSettings" class="small-btn" title="Закрыть">✕</button></div>
-  <p>Цвета зависят от вашей текущей команды. Настройки сохраняются в этом браузере.</p>
-  <label class="settings-row">Союзники <input type="color" id="friendColor" value="#3b82f6"></label>
-  <label class="settings-row">Противники <input type="color" id="enemyColor" value="#ef4444"></label>
-  <label class="settings-row">Мой персонаж <input type="color" id="ownColor" value="#22c55e"></label>
-  <label class="settings-row">Показывать мёртвых <input type="checkbox" id="showDead"></label>
-  <label class="settings-row">Показывать непроверенные записи <input type="checkbox" id="showUnknown"></label>
-  <label class="settings-row">Показывать направление взгляда <input type="checkbox" id="showDirection" checked></label>
-  <label class="settings-row">Круг шума на веб-карте <input type="checkbox" id="showNoise" checked></label>
-  <label class="settings-row">Подписи плэнтов A / B на веб-карте <input type="checkbox" id="showSites" checked></label>
-  <label class="settings-row">Таймер C4 на большой карте <input type="checkbox" id="showBombTimer" checked></label>
-  <label class="settings-row">Зоны смоков <input type="checkbox" id="showSmokes" checked></label>
-  <label class="settings-row">Зоны молотовых <input type="checkbox" id="showFire" checked></label>
-  <label class="settings-row">Пунктирный путь гранат <input type="checkbox" id="showPaths" checked></label>
-  <div class="native-overlay-panel" id="nativeOverlayPanel">
-    <div class="native-overlay-head"><b>▣ Мини-радар Windows</b><span id="overlayStatus">Проверка…</span></div>
-    <p>Это отдельное окно Rust/Win32, не браузер. Без системной рамки. Перемещайте за верхнюю полосу, меняйте размер за края. Крестик внутри окна закрывает мини-карту.</p>
-    <label class="settings-row">Открыть отдельное окно <input type="checkbox" id="nativeVisible"></label>
-    <label class="settings-row">Поверх всех окон <input type="checkbox" id="nativeTop" checked></label>
-    <label class="settings-row">Я в центре карты <input type="checkbox" id="nativeCenter" checked></label>
-    <label class="settings-row">Следовать за игроком в спектаторе <input type="checkbox" id="nativeFollowSpec" checked></label>
-    <label class="settings-row">Вращать по взгляду <input type="checkbox" id="nativeRotate" checked></label>
-    <label class="settings-row">Круг шума на миникарте <input type="checkbox" id="nativeNoise" checked></label>
-    <label class="settings-row">Подписи плэнтов A / B на миникарте <input type="checkbox" id="nativeSites" checked></label>
-    <label class="settings-row">Таймер C4 на миникарте <input type="checkbox" id="nativeBombTimer" checked></label>
-    <label class="settings-row">Смоки в миникарте <input type="checkbox" id="nativeSmokes" checked></label>
-    <label class="settings-row">Молотовы в миникарте <input type="checkbox" id="nativeFire" checked></label>
-    <label class="settings-row">Пунктир гранат в миникарте <input type="checkbox" id="nativePaths" checked></label>
-    <label class="settings-row">Масштаб <span id="nativeZoomLabel">1.0×</span> <input type="range" id="nativeZoom" min="0.35" max="4" step="0.05" value="1"></label>
-    <label class="settings-row">Непрозрачность <span id="nativeOpacityLabel">100%</span> <input type="range" id="nativeOpacity" min="50" max="100" step="5" value="100"></label>
-    <p id="nativeHelp">Управление также доступно в самом окне: колесо мыши — масштаб, C — центрировать, T — поверх всех.</p>
+  <div class="settings-heading"><div><div class="eyebrow">ВАШ РАДАР</div><h2 id="settingsTitle">Настройки</h2></div><button id="closeSettings" class="small-btn" aria-label="Закрыть настройки">✕</button></div>
+  <div class="settings-tabs" role="tablist" aria-label="Раздел настроек">
+   <button class="settings-tab active" id="settingsTabMap" role="tab" aria-selected="true" aria-controls="settingsMap" data-settings-tab="map">Карта</button>
+   <button class="settings-tab" id="settingsTabMini" role="tab" aria-selected="false" aria-controls="nativeOverlayPanel" tabindex="-1" data-settings-tab="mini">Мини-карта</button>
+   <button class="settings-tab" id="settingsTabSound" role="tab" aria-selected="false" aria-controls="settingsSound" tabindex="-1" data-settings-tab="sound">Звук</button>
   </div>
-  <div class="settings-actions"><button class="small-btn" id="resetSettings">По умолчанию</button><button class="small-btn active" id="saveSettings">Готово</button></div>
+  <div class="settings-body">
+   <section id="settingsMap" class="settings-pane" role="tabpanel" aria-labelledby="settingsTabMap" data-settings-panel="map"><p class="settings-note">Основная карта. Настройки сохраняются в этом браузере.</p><label class="settings-row">Союзники<input type="color" id="friendColor" data-pref-field="friend" value="#f2c477"></label><label class="settings-row">Противники<input type="color" id="enemyColor" data-pref-field="enemy" value="#f2c477"></label><label class="settings-row">Мой персонаж<input type="color" id="ownColor" data-pref-field="own" value="#f2c477"></label><label class="settings-row">Показывать мёртвых<input type="checkbox" id="showDead" data-pref-field="showDead"></label><label class="settings-row">Непроверенные записи<input type="checkbox" id="showUnknown" data-pref-field="showUnknown"></label><label class="settings-row">Направление взгляда<input type="checkbox" id="showDirection" data-pref-field="showDirection"></label><label class="settings-row">Плэнты A / B<input type="checkbox" id="showSites" data-pref-field="showSites"></label><label class="settings-row">Таймер C4<input type="checkbox" id="showBombTimer" data-pref-field="showBombTimer"></label><label class="settings-row">Смоки<input type="checkbox" id="showSmokes" data-pref-field="showSmokes"></label><label class="settings-row">Молотовы<input type="checkbox" id="showFire" data-pref-field="showFire"></label><label class="settings-row">Траектории гранат<input type="checkbox" id="showPaths" data-pref-field="showPaths"></label></section>
+   <section id="nativeOverlayPanel" class="settings-pane" role="tabpanel" aria-labelledby="settingsTabMini" data-settings-panel="mini" hidden>
+    <div class="native-overlay-head"><b>Отдельное окно</b><span id="overlayStatus" role="status" aria-live="polite">Проверка…</span></div><label class="settings-row">Открыть мини-карту<input type="checkbox" id="nativeVisible" data-native-field="visible"></label>
+    <p class="settings-note">Настройки мини-карты сохраняются в приложении и восстанавливаются после перезапуска.</p>
+    <label class="settings-row">Что настроить<select id="nativeSectionSelect"><option value="players">Игроки и подписи</option><option value="objects">Бомба и гранаты</option><option value="window">Окно и камера</option></select></label>
+    <section class="native-group" data-native-group="players"><div class="settings-presets"><span>Быстрый вид</span><button class="small-btn" data-native-preset="compact">Компактно</button><button class="small-btn" data-native-preset="detailed">Подробно</button></div><div class="toggle-grid"><label class="settings-row">Мой персонаж<input type="checkbox" id="nativeSelf" data-native-field="show_self"></label><label class="settings-row">Союзники<input type="checkbox" id="nativeAllies" data-native-field="show_allies"></label><label class="settings-row">Противники<input type="checkbox" id="nativeEnemies" data-native-field="show_enemies"></label><label class="settings-row">Маркеры за краем карты<input type="checkbox" id="nativeOffscreen" data-native-field="show_offscreen"></label><label class="settings-row">Направление взгляда<input type="checkbox" id="nativeDirection" data-native-field="show_direction"></label><label class="settings-row">Никнеймы<input type="checkbox" id="nativeNames" data-native-field="show_names"></label><label class="settings-row">ХП: число<input type="checkbox" id="nativeHP" data-native-field="show_hp"></label><label class="settings-row">ХП: полоска<input type="checkbox" id="nativeHPBar" data-native-field="show_hp_bar"></label><label class="settings-row">Оружие: иконка<input type="checkbox" id="nativeWeaponIcon" data-native-field="show_weapon_icon"></label><label class="settings-row">Оружие: название<input type="checkbox" id="nativeWeaponName" data-native-field="show_weapon_name"></label><label class="settings-row">Броня и шлем<input type="checkbox" id="nativeArmor" data-native-field="show_armor"></label><label class="settings-row">Стрелки выше / ниже<input type="checkbox" id="nativeHeight" data-native-field="show_height"></label><label class="settings-row">Белый крест ослепления<input type="checkbox" id="nativeFlashed" data-native-field="show_flashed"></label></div><label class="settings-row range-row"><span>Размер маркера<output id="nativeMarkerScaleLabel" for="nativeMarkerScale"></output></span><input type="range" id="nativeMarkerScale" data-native-field="marker_scale" data-format="scale" min="0.65" max="1.75" step="0.05"></label><label class="settings-row range-row"><span>Размер подписей<output id="nativeTextSizeLabel" for="nativeTextSize"></output></span><input type="range" id="nativeTextSize" data-native-field="text_size" data-format="px" min="9" max="18" step="1"></label><label class="settings-row">Союзники<input type="color" id="nativeFriendColor" data-native-field="friend_color" value="#f2c477"></label><label class="settings-row">Противники<input type="color" id="nativeEnemyColor" data-native-field="enemy_color" value="#f2c477"></label><label class="settings-row">Мой персонаж<input type="color" id="nativeOwnColor" data-native-field="self_color" value="#f2c477"></label></section>
+    <section class="native-group" data-native-group="objects" hidden><label class="settings-row">Бомба и её носитель<input type="checkbox" id="nativeC4" data-native-field="show_c4"></label><label class="settings-row">Плэнты A / B<input type="checkbox" id="nativeSites" data-native-field="show_sites"></label><label class="settings-row">Таймер C4<input type="checkbox" id="nativeBombTimer" data-native-field="show_bomb_timer"></label><label class="settings-row">Зоны смоков<input type="checkbox" id="nativeSmokes" data-native-field="show_smokes"></label><label class="settings-row">Зоны молотовых<input type="checkbox" id="nativeFire" data-native-field="show_fire"></label><label class="settings-row">Траектории гранат<input type="checkbox" id="nativePaths" data-native-field="show_paths"></label><label class="settings-row">Таймеры смоков и огня<input type="checkbox" id="nativeUtilityTimers" data-native-field="show_utility_timers"></label></section>
+    <section class="native-group" data-native-group="window" hidden><label class="settings-row">Поверх всех окон<input type="checkbox" id="nativeTop" data-native-field="topmost"></label><label class="settings-row">Мой персонаж в центре<input type="checkbox" id="nativeCenter" data-native-field="center_local"></label><label class="settings-row">Следовать в режиме наблюдения<input type="checkbox" id="nativeFollowSpec" data-native-field="follow_spectator"></label><label class="settings-row">Вращать по взгляду<input type="checkbox" id="nativeRotate" data-native-field="rotate_with_view"></label><label class="settings-row range-row"><span>Масштаб карты<output id="nativeZoomLabel" for="nativeZoom"></output></span><input type="range" id="nativeZoom" data-native-field="zoom" data-format="scale" min="0.35" max="4" step="0.05"></label><label class="settings-row range-row"><span>Непрозрачность окна<output id="nativeOpacityLabel" for="nativeOpacity"></output></span><input type="range" id="nativeOpacity" data-native-field="opacity" data-format="percent" min="50" max="100" step="5"></label><p class="settings-note">Перетаскивайте окно за верхнюю полосу, меняйте размер за края. Крестик внутри окна закрывает мини-карту.</p></section>
+    <p class="settings-note" id="nativeHelp">Отдельная мини-карта доступна в Windows. Раздел «Звук» настраивает звуковые волны.</p>
+   </section>
+   <section id="settingsSound" class="settings-pane" role="tabpanel" aria-labelledby="settingsTabSound" data-settings-panel="sound" hidden>
+    <p class="settings-note">Шумы вашего персонажа: кольца остаются в месте звука и плавно затухают. Радиус — верхняя оценка для открытого пространства; стены и перекрытия уменьшают слышимость.</p>
+    <div class="sound-summary"><span>Шаги <b>≈ 28 м</b></span><span>Глушитель <b>≈ 36 м</b></span></div>
+    <fieldset><legend>Основная карта</legend><label class="settings-row">Показывать шум<input type="checkbox" id="showNoise" data-pref-field="showNoise"></label><label class="settings-row">Анимация волн<input type="checkbox" id="noiseAnimation" data-pref-field="noiseAnimation"></label><label class="settings-row">Граница радиуса и метры<input type="checkbox" id="noiseRange" data-pref-field="noiseRange"></label><label class="settings-row">Цвет волн<input type="color" id="noiseColor" data-pref-field="noiseColor" value="#f2c477"></label><label class="settings-row range-row"><span>Яркость волн<output id="noiseOpacityLabel" for="noiseOpacity"></output></span><input type="range" id="noiseOpacity" data-pref-field="noiseOpacity" data-format="percent" min="10" max="100" step="5"></label></fieldset>
+    <fieldset><legend>Мини-карта</legend><label class="settings-row">Показывать шум<input type="checkbox" id="nativeNoise" data-native-field="show_noise"></label><label class="settings-row">Анимация волн<input type="checkbox" id="nativeNoiseAnimation" data-native-field="noise_animation"></label><label class="settings-row">Граница радиуса и метры<input type="checkbox" id="nativeNoiseRange" data-native-field="noise_show_range"></label><label class="settings-row">Цвет волн<input type="color" id="nativeNoiseColor" data-native-field="noise_color" value="#f2c477"></label><label class="settings-row range-row"><span>Яркость волн<output id="nativeNoiseOpacityLabel" for="nativeNoiseOpacity"></output></span><input type="range" id="nativeNoiseOpacity" data-native-field="noise_opacity" data-format="percent" min="10" max="100" step="5"></label></fieldset>
+   </section>
+  </div>
+  <div class="settings-footer"><span>Изменения сохраняются автоматически</span><div class="settings-actions"><button class="small-btn" id="resetSettings">Сбросить раздел</button><button class="small-btn active" id="saveSettings">Готово</button></div></div>
  </div>
 </div>
 <script>
@@ -214,17 +215,32 @@ let mapImageError='',mapSelectionError='',mapSelectionPending=false;
 let mapSelectionVersion=0,connectionError='',lastStale=null;
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='',snapshotReceivedAt=0;
-const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true};
+const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true,noiseAnimation:true,noiseRange:true,noiseColor:'#f2c477',noiseOpacity:75};
 let prefs={...DEFAULT_PREFS};
+const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
 const validHex=v=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v);
+function validPref(key,value){
+ const fallback=DEFAULT_PREFS[key];
+ if(typeof fallback==='boolean')return typeof value==='boolean';
+ if(typeof fallback==='number')return Number.isFinite(value)&&value>=10&&value<=100;
+ return validHex(value);
+}
 function loadPrefs(){try{const saved=JSON.parse(localStorage.getItem('cas-radar-v06-settings')||'{}');
-  for(const name of ['friend','enemy','own'])if(validHex(saved[name]))prefs[name]=saved[name];
-  for(const name of ['showDead','showUnknown','showDirection','showNoise','showSites','showSmokes','showFire','showPaths','showBombTimer'])if(typeof saved[name]==='boolean')prefs[name]=saved[name];
-}catch(_){ }applyPrefs();}
-function applyPrefs(){for(const name of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+name,prefs[name]);
-  for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']])$(id).value=prefs[key];
-  for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths'],['showBombTimer','showBombTimer']])$(id).checked=prefs[key];
-  lastListKey='';}
+ for(const key of Object.keys(DEFAULT_PREFS))if(validPref(key,saved[key]))prefs[key]=saved[key];
+}catch(_){}applyPrefs();}
+function settingOutput(input){
+ const output=$(input.id+'Label');if(!output)return;
+ const value=Number(input.value);output.textContent=input.dataset.format==='scale'?value.toFixed(2).replace(/0$/,'')+'×':
+   input.dataset.format==='percent'?value+'%':input.dataset.format==='px'?value+' px':String(value);
+}
+function applyPrefs(){
+ for(const key of ['friend','enemy','own'])document.documentElement.style.setProperty('--'+key,prefs[key]);
+ for(const input of document.querySelectorAll('[data-pref-field]')){
+   const value=prefs[input.dataset.prefField];if(input.type==='checkbox')input.checked=Boolean(value);else input.value=value;
+   settingOutput(input);
+ }lastListKey='';
+}
+function savePrefs(){try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){}applyPrefs();repaintPlayers();}
 function localTeam(){let t=Number(snapshot.local_team);if(t===2||t===3)return t;
   const me=(snapshot.players||[]).find(p=>p.local);return me?.team||0;}
 function playerColor(p){if(p.local)return prefs.own;const side=localTeam();if(side===2||side===3)return p.team===side?prefs.friend:prefs.enemy;
@@ -411,6 +427,37 @@ function updateBombCountdown(){
  arc.style.strokeDashoffset=String(perimeter*(1-fraction));
  arc.style.stroke=seconds<=5?'#ff6170':seconds<=10?'#ffb45b':'#25c5ef';
 }
+function noisePulseAt(age,duration){
+ if(!Number.isFinite(age)||age<0||!Number.isFinite(duration)||duration<=0||age>=duration)return null;
+ const phase=age/duration;return {radius:1-Math.pow(1-phase,3),opacity:Math.pow(1-phase,1.5)};
+}
+function drawNoise(now,size){
+ if(!prefs.showNoise)return;
+ const events=Array.isArray(snapshot.noise_events)?snapshot.noise_events:snapshot.noise?[snapshot.noise]:[];
+ const units=Number(mapData().radar_info?.scale);if(!Number.isFinite(units)||units<=0)return;
+ let latest=null;
+ for(const noise of events){
+   const position=noise.position;if(!Array.isArray(position)||!position.every(Number.isFinite)||!inLayer(position))continue;
+   const pulse=noisePulseAt(Number(noise.age_ms)+snapshotAge(now)*1000,Number(noise.duration_ms)||1000);
+   const radius=Number(noise.radius_units)/(units*1024)*size;if(!pulse||!Number.isFinite(radius)||radius<=0)continue;
+   latest=noise;
+   const point=xy(position),opacity=pulse.opacity*prefs.noiseOpacity/100;
+   const animate=prefs.noiseAnimation&&!reducedMotion.matches;
+   const front=animate?radius*pulse.radius:radius;
+   ctx.save();ctx.strokeStyle=prefs.noiseColor;ctx.lineWidth=1;
+   if(prefs.noiseRange&&animate){ctx.globalAlpha=opacity*.18;ctx.setLineDash([3,6]);ctx.beginPath();ctx.arc(point.x,point.y,radius,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);}
+   if(front>.5){ctx.globalAlpha=opacity;ctx.shadowColor=prefs.noiseColor;ctx.shadowBlur=9;ctx.lineWidth=2;
+     ctx.beginPath();ctx.arc(point.x,point.y,front,0,Math.PI*2);ctx.stroke();ctx.shadowBlur=0;
+     if(animate){ctx.globalAlpha=opacity*.32;ctx.lineWidth=1;ctx.beginPath();ctx.arc(point.x,point.y,front*.86,0,Math.PI*2);ctx.stroke();}}
+   ctx.restore();
+ }
+ if(latest&&prefs.noiseRange){
+   const point=xy(latest.position),text=(latest.kind==='shot'?'≤ ':'≈ ')+(latest.radius_units*.0254).toFixed(0)+' м';
+   ctx.save();ctx.font='700 11px Segoe UI,Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+   const width=ctx.measureText(text).width;ctx.fillStyle='#101a23e8';ctx.fillRect(point.x-width/2-6,point.y-38,width+12,18);
+   ctx.fillStyle=prefs.noiseColor;ctx.fillText(text,point.x,point.y-29);ctx.restore();
+ }
+}
 function draw(now){requestAnimationFrame(draw);
  if(now-lastDraw<16)return;
  lastDraw=now;
@@ -423,16 +470,7 @@ function draw(now){requestAnimationFrame(draw);
  const size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
  ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
  const people=smoothShown(now),reference=referencePosition();
- if(prefs.showNoise && snapshot.noise && Number.isFinite(snapshot.noise.radius_units)){
-   const me=people.find(p=>p.local&&knownLife(p)==='alive');
-   const units=Number(mapData().radar_info?.scale);
-   if(me&&Number.isFinite(units)&&units>0){
-     const pt=xy(me.position),r=snapshot.noise.radius_units/(units*1024)*size;
-     if(Number.isFinite(r)&&r>1){ctx.save();ctx.fillStyle='rgba(255,192,97,0.09)';
-       ctx.strokeStyle='rgba(255,207,125,0.82)';ctx.lineWidth=1.8;
-       ctx.beginPath();ctx.arc(pt.x,pt.y,r,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();}
-   }
- }
+ drawNoise(now,size);
  if(prefs.showSites){
    const sites=mapData().bombsites;
    if(sites)for(const name of ['A','B']){
@@ -632,66 +670,95 @@ async function init(){loadPrefs();fit();window.addEventListener('resize',fit);
   if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const {response:r,data}=await fetchJSON('/api/maps',{},4000);if(!r.ok)throw Error('Map list HTTP '+r.status);maps=data.maps||{};
   let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale).sort();$('mapSelect').innerHTML='<option value="">Выберите карту…</option>'+keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
   clearMap();
-}catch(e){setNotice('Не удалось получить список карт: '+e.message);}poll();requestAnimationFrame(draw);}
+}catch(e){setNotice('Не удалось получить список карт: '+e.message);}updateNativeSettings();poll();requestAnimationFrame(draw);}
 $('mapSelect').addEventListener('change',e=>{if(e.target.value)selectSharedMap(e.target.value);else $('mapSelect').value=map;});
 $('autoMapBtn').addEventListener('click',()=>{if(!autoMapEnabled)selectSharedMap(null);else if(mapKnown())selectSharedMap(map);});
 $('layerSelect').addEventListener('change',e=>{layer=e.target.value;loadMapImage();});
 $('namesBtn').addEventListener('click',()=>{showNames=!showNames;$('namesBtn').classList.toggle('active',showNames);});
-$('settingsBtn').addEventListener('click',()=>{openSettings();});
-$('miniBtn').addEventListener('click',()=>{openSettings();$('nativeVisible').focus();});
-async function openSettings(){
-  $('settingsBackdrop').hidden=false;
-  await updateNativeSettings();
+let settingsTab='map',settingsFocus=null,nativeAvailable=false,nativeSettings={},nativeDefaults={},nativeRevision=0,nativePending=Promise.resolve();
+function selectSettingsTab(value){
+ settingsTab=value;
+ for(const button of document.querySelectorAll('[data-settings-tab]')){const active=button.dataset.settingsTab===value;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;}
+ for(const panel of document.querySelectorAll('[data-settings-panel]'))panel.hidden=panel.dataset.settingsPanel!==value;
 }
-let nativeAvailable=false;
-async function updateNativeSettings(){try {
- const res=await fetch(api('/api/overlay'),{cache:'no-store'});
- if(!res.ok)throw Error('HTTP '+res.status);
- const d=await res.json();nativeAvailable=Boolean(d.supported);
- $('overlayStatus').textContent=!d.supported?'Требуется Windows':!d.window_ready?'Инициализация окна…':(d.settings?.visible?'Окно открыто':'Окно закрыто');
- for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']]) $(id).checked=Boolean(d.settings?.[field]);
- $('nativeZoom').value=d.settings?.zoom??1;$('nativeZoomLabel').textContent=Number($('nativeZoom').value).toFixed(2).replace(/0$/,'')+'×';
- $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
- $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
- $('miniBtn').classList.toggle('active',Boolean(d.settings?.visible));
- if(nativeAvailable && ['friend','enemy','own'].some(k=>d.settings?.[k==='own'?'self_color':k+'_color']!==prefs[k])){
-   nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});
+function nativeGroup(){for(const group of document.querySelectorAll('[data-native-group]'))group.hidden=group.dataset.nativeGroup!==$('nativeSectionSelect').value;}
+function hydrateNative(){
+ for(const input of document.querySelectorAll('[data-native-field]')){
+   const value=nativeSettings[input.dataset.nativeField];if(input.type==='checkbox')input.checked=Boolean(value);else input.value=value??nativeDefaults[input.dataset.nativeField]??'';
+   input.disabled=!nativeAvailable;settingOutput(input);
  }
-}catch(e){nativeAvailable=false;$('overlayStatus').textContent='Ошибка: '+e.message;}}
-let nativePending=Promise.resolve();
+ for(const button of document.querySelectorAll('[data-native-preset]'))button.disabled=!nativeAvailable;
+ $('miniBtn').classList.toggle('active',Boolean(nativeSettings.visible));
+}
+async function updateNativeSettings(){
+ try{const {response,data}=await fetchJSON('/api/overlay',{cache:'no-store'},4000);if(!response.ok)throw Error('HTTP '+response.status);
+   nativeAvailable=Boolean(data.supported);nativeDefaults=data.defaults||{};nativeSettings={...nativeDefaults,...data.settings};hydrateNative();
+   $('overlayStatus').textContent=!nativeAvailable?'Требуется Windows':!data.window_ready?'Инициализация…':nativeSettings.visible?'Окно открыто':'Окно закрыто';
+ }catch(error){nativeAvailable=false;hydrateNative();$('overlayStatus').textContent='Ошибка: '+error.message;}
+}
 function nativeChange(fields){
- if(!nativeAvailable)return;
+ if(!nativeAvailable)return Promise.resolve();
+ const revision=++nativeRevision;Object.assign(nativeSettings,fields);hydrateNative();$('overlayStatus').textContent='Сохранение…';
  nativePending=nativePending.then(async()=>{
-   const res=await fetch(api('/api/overlay'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)});
-   const d=await res.json();if(!res.ok)throw Error(d.error||'HTTP '+res.status);
-   $('overlayStatus').textContent=!d.window_ready?'Ожидание запуска окна…':(d.settings.visible?'Окно открыто':'Окно закрыто');
-   $('miniBtn').classList.toggle('active',d.settings.visible);
- }).catch(e=>{$('overlayStatus').textContent='Ошибка: '+e.message;});
+   const {response,data}=await fetchJSON('/api/overlay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)},4000);
+   if(!response.ok)throw Error(data.error||'HTTP '+response.status);
+   if(revision===nativeRevision){nativeSettings=data.settings;hydrateNative();$('overlayStatus').textContent='Сохранено · '+(nativeSettings.visible?'окно открыто':'окно закрыто');}
+ }).catch(async error=>{if(revision===nativeRevision){await updateNativeSettings();$('overlayStatus').textContent='Не сохранено: '+error.message;}});
+ return nativePending;
 }
-for(const [field,id] of [['visible','nativeVisible'],['topmost','nativeTop'],['center_local','nativeCenter'],['follow_spectator','nativeFollowSpec'],['rotate_with_view','nativeRotate'],['show_noise','nativeNoise'],['show_sites','nativeSites'],['show_smokes','nativeSmokes'],['show_fire','nativeFire'],['show_paths','nativePaths'],['show_bomb_timer','nativeBombTimer']])
- $(id).addEventListener('change',e=>nativeChange({[field]:e.target.checked}));
-$('nativeZoom').addEventListener('input',e=>{$('nativeZoomLabel').textContent=Number(e.target.value).toFixed(2).replace(/0$/,'')+'×';});
-$('nativeZoom').addEventListener('change',e=>nativeChange({zoom:Number(e.target.value)}));
-$('nativeOpacity').addEventListener('input',e=>{$('nativeOpacityLabel').textContent=e.target.value+'%';});
-$('nativeOpacity').addEventListener('change',e=>nativeChange({opacity:Number(e.target.value)}));
-
-function closeSettings(){$('settingsBackdrop').hidden=true;}
-$('closeSettings').addEventListener('click',closeSettings);
-$('saveSettings').addEventListener('click',closeSettings);
-$('settingsBackdrop').addEventListener('click',e=>{if(e.target===$('settingsBackdrop'))closeSettings();});
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSettings();});
-for(const [key,id] of [['friend','friendColor'],['enemy','enemyColor'],['own','ownColor']]){
-  $(id).addEventListener('input',e=>{if(validHex(e.target.value)){prefs[key]=e.target.value;applyPrefs();
-    try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
-    if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});}});
+async function openSettings(tab=settingsTab){
+ settingsFocus=document.activeElement;selectSettingsTab(tab);$('settingsBackdrop').hidden=false;
+ (tab==='mini'?$('nativeSectionSelect'):document.querySelector('[data-settings-tab="'+tab+'"]')).focus();
+ await nativePending;await updateNativeSettings();
 }
-for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['showDirection','showDirection'],['showNoise','showNoise'],['showSites','showSites'],['showSmokes','showSmokes'],['showFire','showFire'],['showPaths','showPaths'],['showBombTimer','showBombTimer']]){
-  $(id).addEventListener('change',e=>{prefs[key]=e.target.checked;applyPrefs();
-    try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
+function closeSettings(){$('settingsBackdrop').hidden=true;settingsFocus?.focus();}
+$('settingsBtn').addEventListener('click',()=>openSettings());
+$('miniBtn').addEventListener('click',()=>openSettings('mini'));
+$('nativeSectionSelect').addEventListener('change',nativeGroup);
+for(const button of document.querySelectorAll('[data-settings-tab]')){
+ button.addEventListener('click',()=>selectSettingsTab(button.dataset.settingsTab));
+ button.addEventListener('keydown',event=>{
+   const tabs=[...document.querySelectorAll('[data-settings-tab]')],index=tabs.indexOf(button);let target=null;
+   if(event.key==='ArrowRight')target=tabs[(index+1)%tabs.length];if(event.key==='ArrowLeft')target=tabs[(index+tabs.length-1)%tabs.length];
+   if(event.key==='Home')target=tabs[0];if(event.key==='End')target=tabs.at(-1);
+   if(target){event.preventDefault();selectSettingsTab(target.dataset.settingsTab);target.focus();}
+ });
 }
-$('resetSettings').addEventListener('click',()=>{prefs={...DEFAULT_PREFS};applyPrefs();
-  try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
-  if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});});
+for(const input of document.querySelectorAll('[data-native-field]')){
+ input.disabled=true;
+ if(input.type==='range')input.addEventListener('input',()=>settingOutput(input));
+ input.addEventListener('change',()=>nativeChange({[input.dataset.nativeField]:input.type==='checkbox'?input.checked:input.type==='range'?Number(input.value):input.value}));
+}
+for(const input of document.querySelectorAll('[data-pref-field]')){
+ input.addEventListener(input.type==='checkbox'?'change':'input',()=>{
+   const value=input.type==='checkbox'?input.checked:input.type==='range'?Number(input.value):input.value;
+   if(validPref(input.dataset.prefField,value)){prefs[input.dataset.prefField]=value;savePrefs();}
+ });
+}
+for(const button of document.querySelectorAll('[data-native-preset]'))button.addEventListener('click',()=>{
+ const detailed=button.dataset.nativePreset==='detailed';
+ nativeChange({show_names:detailed,show_hp:true,show_hp_bar:detailed,show_weapon_icon:true,show_weapon_name:detailed,
+   show_armor:detailed,show_height:true,show_flashed:true,marker_scale:detailed?1:0.85,text_size:detailed?13:11});
+});
+$('closeSettings').addEventListener('click',closeSettings);$('saveSettings').addEventListener('click',closeSettings);
+$('settingsBackdrop').addEventListener('click',event=>{if(event.target===$('settingsBackdrop'))closeSettings();});
+document.addEventListener('keydown',event=>{
+ if($('settingsBackdrop').hidden)return;if(event.key==='Escape'){closeSettings();return;}
+ if(event.key==='Tab'){
+   const controls=[...$('settingsBackdrop').querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')].filter(el=>el.getClientRects().length>0&&el.tabIndex>=0);
+   const first=controls[0],last=controls.at(-1);
+   if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+   else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+ }
+});
+$('resetSettings').addEventListener('click',()=>{
+ const scope=settingsTab==='mini'?document.querySelector('[data-native-group="'+$('nativeSectionSelect').value+'"]'):
+   document.querySelector('[data-settings-panel="'+settingsTab+'"]');
+ for(const input of scope.querySelectorAll('[data-pref-field]'))prefs[input.dataset.prefField]=DEFAULT_PREFS[input.dataset.prefField];
+ savePrefs();const fields={};for(const input of scope.querySelectorAll('[data-native-field]')){
+   const key=input.dataset.nativeField;if(Object.hasOwn(nativeDefaults,key))fields[key]=nativeDefaults[key];
+ }if(Object.keys(fields).length)nativeChange(fields);
+});
 
 $('diagBtn').addEventListener('click',async()=>{
   const d={status:snapshot.status,message:snapshot.message,game_map:snapshot.game_map,game_map_source:snapshot.game_map_source,diagnostics:snapshot.diagnostics};

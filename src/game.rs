@@ -680,13 +680,34 @@ impl CS2Reader {
                 let speed=vel.map(|v|v[0].hypot(v[1])).filter(|v|v.is_finite() && *v<2000.);
                 let flags=self.schema.field("C_BaseEntity","m_fFlags").and_then(|o|p.read(pawn+o,4))
                     .and_then(|v|v.try_into().ok()).map(u32::from_le_bytes);
-                let duck=self.schema.field("C_CSPlayerPawn","m_flDuckAmount").and_then(|o|p.read(pawn+o,4))
-                    .and_then(|v|v.try_into().ok()).map(f32::from_le_bytes)
+                let movement=opt_u64(p,pawn,self.schema.field("C_BasePlayerPawn","m_pMovementServices"));
+                let duck=self.schema.field("CCSPlayer_MovementServices","m_flDuckAmount").filter(|_|valid_pointer(movement))
+                    .and_then(|off|try_f32(p,movement+off))
                     .filter(|v|v.is_finite() && (0.0..=1.1).contains(v));
                 let shots=self.schema.field("C_CSPlayerPawn","m_iShotsFired").and_then(|o|try_i32(p,pawn+o))
                     .filter(|v|(0..=99).contains(v));
+                let walking=self.schema.field("C_CSPlayerPawn","m_bIsWalking")
+                    .and_then(|off|try_u8(p,pawn+off)).filter(|v|*v<=1).map(|v|v==1);
+                let step_side=self.schema.field("CPlayer_MovementServices_Humanoid","m_nStepside").filter(|_|valid_pointer(movement))
+                    .and_then(|off|try_i32(p,movement+off)).filter(|v|(0..=1).contains(v)).map(|v|v as u8);
+                let step_sound_time=self.schema.field("CPlayer_MovementServices_Humanoid","m_flStepSoundTime").filter(|_|valid_pointer(movement))
+                    .and_then(|off|try_f32(p,movement+off)).filter(|v|(0.0..=2000.).contains(v));
+                let fall_velocity=self.schema.field("CPlayer_MovementServices_Humanoid","m_flFallVelocity").filter(|_|valid_pointer(movement))
+                    .and_then(|off|try_f32(p,movement+off)).filter(|v|v.abs()<4000.);
+                let emit_sound_time=self.schema.field("C_CSPlayerPawn","m_flEmitSoundTime")
+                    .and_then(|off|try_f32(p,pawn+off)).filter(|v|*v>=0.);
+                let shot_time=self.schema.field("C_CSPlayerPawn","m_flLastFiredWeaponTime")
+                    .and_then(|off|try_f32(p,pawn+off)).filter(|v|*v>=0.);
+                let services=opt_u64(p,pawn,self.schema.field("C_BasePlayerPawn","m_pWeaponServices"));
+                let active=self.schema.field("CPlayer_WeaponServices","m_hActiveWeapon").filter(|_|valid_pointer(services))
+                    .and_then(|off|try_i32(p,services+off)).map(|v|v as u32)
+                    .filter(|h|*h!=u32::MAX&&(*h&0x7fff)>0).map(|h|self.entity(p,list,h&0x7fff)).filter(|ptr|valid_pointer(*ptr));
+                let silenced=active.and_then(|weapon|self.schema.field("C_CSWeaponBase","m_bSilencerOn")
+                    .and_then(|off|try_u8(p,weapon+off)).filter(|v|*v<=1).map(|v|v==1));
                 local_motion=Some(LocalMotion{speed,on_ground:flags.map(|f|f&1!=0),
-                    ducking:duck.map(|v|v>0.6),shots_fired:shots,weapon:None});
+                    ducking:duck.map(|v|v>0.5),shots_fired:shots,
+                    weapon:active.and_then(|ptr|self.item(p,ptr)).map(|(_,name)|name),
+                    walking,vertical_speed:vel.map(|v|v[2]),fall_velocity,step_side,step_sound_time,emit_sound_time,shot_time,silenced});
             }
             let name=name_off.map(|o|p.cstr(ctl+o,128)).unwrap_or_default();
             let (mut weapon,mut inventory,mut has_c4)=("—".to_owned(),vec![],None);
@@ -1038,5 +1059,26 @@ mod bomb_read_tests {
  #[test]fn skinned_knives_are_still_knives(){
   for id in [42,59,500,503,505,507,512,515,520,523,525,526]{assert_eq!(weapon_name(id),"Knife");}
   assert_eq!(weapon_name(501),"Item #501");assert_eq!(weapon_name(7),"AK-47");
+ }
+ #[test]fn duck_and_footstep_signals_come_from_movement_services(){
+  let offsets=json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16,"dwGlobalVars":24,"dwLocalPlayerPawn":32}});
+  let classes=json!({"client.dll":{"classes":{
+   "CCSPlayerController":{"fields":{"m_hPlayerPawn":32,"m_bPawnIsAlive":36}},
+   "CBasePlayerController":{"fields":{"m_nTickBase":48}},
+   "C_BaseEntity":{"fields":{"m_iTeamNum":16,"m_iHealth":20,"m_pGameSceneNode":40,"m_fFlags":48,"m_vecAbsVelocity":52}},
+   "CGameSceneNode":{"fields":{"m_vecAbsOrigin":16}},
+   "C_BasePlayerPawn":{"fields":{"m_pMovementServices":88}},
+   "CCSPlayer_MovementServices":{"fields":{"m_flDuckAmount":12}},
+   "CPlayer_MovementServices_Humanoid":{"fields":{"m_nStepside":16,"m_flStepSoundTime":20}},
+   "C_CSPlayerPawn":{"fields":{"m_bIsWalking":64,"m_flEmitSoundTime":68}}
+  }}});
+  let mut reader=CS2Reader::new(Schema::from_json(&offsets,&classes,json!({})).unwrap());let mut p=initial();
+  p.put(PAWN+88,&0x700000u64.to_le_bytes());p.put(0x700000+12,&0.9f32.to_le_bytes());
+  p.put(0x700000+16,&1i32.to_le_bytes());p.put(0x700000+20,&200f32.to_le_bytes());
+  p.put(PAWN+48,&1u32.to_le_bytes());p.put(PAWN+52,&[220f32,0.,0.].into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>());
+  p.put(PAWN+64,&[1]);p.put(PAWN+68,&100f32.to_le_bytes());
+  let motion=reader.snapshot(&mut p,BASE,0,1,false,false).unwrap().local_motion.unwrap();
+  assert_eq!(motion.ducking,Some(true));assert_eq!(motion.walking,Some(true));assert_eq!(motion.step_side,Some(1));
+  assert_eq!(motion.emit_sound_time,Some(100.));assert_eq!(motion.speed,Some(220.));
  }
 }

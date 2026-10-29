@@ -26,13 +26,20 @@ pub fn screen_point(position:[f32;3], overview:(f32,f32,f32), width:f32, height:
 /// Rotate with the map, then retain distant markers at the visible edge.
 /// Insets reserve space for the header and the readable player labels.
 pub fn marker_point(point:(f32,f32),width:f32,height:f32,angle:f32)->Option<(f32,f32,bool)> {
+    marker_point_padded(point,width,height,angle,65.,62.)
+}
+fn marker_point_padded(point:(f32,f32),width:f32,height:f32,angle:f32,top_padding:f32,bottom_padding:f32)->Option<(f32,f32,bool)> {
     if ![point.0,point.1,width,height,angle].iter().all(|v|v.is_finite()) || width<100. || height<100. {return None;}
     let (cx,cy)=(width/2.,height/2.);
     let (sin,cos)=angle.to_radians().sin_cos();
     let (dx,dy)=(point.0-cx,point.1-cy);
     let (x,y)=(cx+dx*cos-dy*sin,cy+dx*sin+dy*cos);
-    let (left,right,top,bottom)=(30.,width-30.,65.,height-62.);
+    let top=top_padding.min(height-12.).max(35.);
+    let (left,right,bottom)=(30.,width-30.,(height-bottom_padding).max(top+1.).min(height-8.));
     if x>=left&&x<=right&&y>=top&&y<=bottom{return Some((x,y,false));}
+    // A dense layout in a small window may reserve space past its geometric
+    // centre. Clip from inside the usable rectangle, never along a negative ray.
+    let (cx,cy)=if cy>=top&&cy<=bottom{(cx,cy)}else{((left+right)*0.5,(top+bottom)*0.5)};
     let (dx,dy)=(x-cx,y-cy);
     let mut t=1.0f32;
     if dx>0. {t=t.min((right-cx)/dx);} else if dx<0. {t=t.min((left-cx)/dx);}
@@ -122,6 +129,27 @@ pub struct OverlaySettings {
     pub show_fire: bool,
     pub show_paths: bool,
     pub show_bomb_timer: bool,
+    pub show_hp:bool,
+    pub show_hp_bar:bool,
+    pub show_weapon_icon:bool,
+    pub show_weapon_name:bool,
+    pub show_names:bool,
+    pub show_armor:bool,
+    pub show_height:bool,
+    pub show_flashed:bool,
+    pub show_c4:bool,
+    pub show_direction:bool,
+    pub show_allies:bool,
+    pub show_enemies:bool,
+    pub show_self:bool,
+    pub show_offscreen:bool,
+    pub show_utility_timers:bool,
+    pub noise_animation:bool,
+    pub noise_show_range:bool,
+    pub noise_opacity:u8,
+    pub noise_color:String,
+    pub marker_scale:f32,
+    pub text_size:u8,
     pub zoom: f32,
     pub opacity: u8,
     pub friend_color: String,
@@ -130,33 +158,58 @@ pub struct OverlaySettings {
 }
 impl Default for OverlaySettings {
     fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,show_bomb_timer:true,
+        show_hp:true,show_hp_bar:true,show_weapon_icon:true,show_weapon_name:true,show_names:false,show_armor:false,
+        show_height:true,show_flashed:true,show_c4:true,show_direction:true,show_allies:true,show_enemies:true,
+        show_self:true,show_offscreen:true,show_utility_timers:true,noise_animation:true,noise_show_range:true,
+        noise_opacity:75,noise_color:"#f2c477".into(),marker_scale:1.,text_size:13,
         zoom:1.0,opacity:100,friend_color:"#3b82f6".into(),
         enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
-        let o=v.as_object().ok_or("Expected settings object")?;
-        for key in o.keys() {if !["visible","topmost","center_local","follow_spectator","rotate_with_view","show_noise","show_sites","show_smokes","show_fire","show_paths","show_bomb_timer","zoom","opacity","friend_color","enemy_color","self_color"].contains(&key.as_str()) {return Err(format!("Unknown setting: {key}"));}}
-        if let Some(x)=o.get("visible"){self.visible=x.as_bool().ok_or("visible must be boolean")?;}
-        if let Some(x)=o.get("topmost"){self.topmost=x.as_bool().ok_or("topmost must be boolean")?;}
-        if let Some(x)=o.get("center_local"){self.center_local=x.as_bool().ok_or("center_local must be boolean")?;}
-        if let Some(x)=o.get("follow_spectator"){self.follow_spectator=x.as_bool().ok_or("follow_spectator must be boolean")?;}
-        if let Some(x)=o.get("rotate_with_view"){self.rotate_with_view=x.as_bool().ok_or("rotate_with_view must be boolean")?;}
-        if let Some(x)=o.get("show_noise"){self.show_noise=x.as_bool().ok_or("show_noise must be boolean")?;}
-        if let Some(x)=o.get("show_sites"){self.show_sites=x.as_bool().ok_or("show_sites must be boolean")?;}
-        if let Some(x)=o.get("show_smokes"){self.show_smokes=x.as_bool().ok_or("show_smokes must be boolean")?;}
-        if let Some(x)=o.get("show_fire"){self.show_fire=x.as_bool().ok_or("show_fire must be boolean")?;}
-        if let Some(x)=o.get("show_paths"){self.show_paths=x.as_bool().ok_or("show_paths must be boolean")?;}
-        if let Some(x)=o.get("show_bomb_timer"){self.show_bomb_timer=x.as_bool().ok_or("show_bomb_timer must be boolean")?;}
-        if let Some(x)=o.get("zoom"){let z=x.as_f64().ok_or("zoom must be numeric")?;if !(0.35..=4.).contains(&z){return Err("zoom outside 0.35-4".into());}self.zoom=z as f32;}
-        if let Some(x)=o.get("opacity"){let z=x.as_u64().ok_or("opacity must be integer")?;if !(50..=100).contains(&z){return Err("opacity outside 50-100".into());}self.opacity=z as u8;}
-        for (key,target) in [("friend_color",&mut self.friend_color),("enemy_color",&mut self.enemy_color),("self_color",&mut self.self_color)] {
-            if let Some(x)=o.get(key){let col=x.as_str().ok_or("color must be string")?;
-                if col.len()!=7||!col.starts_with('#')||!col[1..].bytes().all(|b|b.is_ascii_hexdigit()) {return Err(format!("Invalid {key}"));}
-                *target=col.into();}
+        let patch=v.as_object().ok_or("Expected settings object")?;
+        let mut merged=serde_json::to_value(&*self).map_err(|e|e.to_string())?;
+        for (key,value) in patch {
+            let current=merged.get(key).ok_or_else(||format!("Unknown setting: {key}"))?;
+            if current.is_boolean(){
+                if !value.is_boolean(){return Err(format!("{key} must be boolean"));}
+            }else if current.is_string(){
+                let color=value.as_str().ok_or("color must be string")?;
+                if color.len()!=7||!color.starts_with('#')||!color[1..].bytes().all(|b|b.is_ascii_hexdigit()){
+                    return Err(format!("Invalid {key}"));
+                }
+            }else{
+                let valid=match key.as_str(){
+                    "zoom"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.35..=4.).contains(&v)),
+                    "marker_scale"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.65..=1.75).contains(&v)),
+                    "text_size"=>value.as_u64().is_some_and(|v|(9..=18).contains(&v)),
+                    "opacity"=>value.as_u64().is_some_and(|v|(50..=100).contains(&v)),
+                    "noise_opacity"=>value.as_u64().is_some_and(|v|(10..=100).contains(&v)),
+                    _=>false,
+                };
+                if !valid{return Err(format!("Invalid {key} range or type"));}
+            }
+            merged[key]=value.clone();
         }
-        Ok(())
+        let next=serde_json::from_value(merged).map_err(|e|e.to_string())?;
+        *self=next;Ok(())
     }
+    #[cfg(any(windows,test))]
+    fn player_visible(&self,player:&crate::model::Player,team:u8)->bool{
+        player.life_state=="alive"&&if player.local{self.show_self}else if player.team==team{self.show_allies}else{self.show_enemies}
+    }
+    #[cfg(any(windows,test))]
+    fn marker_padding(&self)->(f32,f32){
+        let line=self.text_size as f32+2.;
+        let mut bottom=10.*self.marker_scale+11.;
+        if self.show_hp_bar{bottom+=6.;}
+        if self.show_hp{bottom+=line;}
+        if self.show_armor{bottom+=line;}
+        if self.show_weapon_icon{bottom+=15.;}
+        if self.show_weapon_name{bottom+=line;}
+        (34.+10.*self.marker_scale+line+6.,bottom)
+    }
+
 }
 #[derive(Clone)]pub struct OverlayController {settings:Arc<Mutex<OverlaySettings>>, #[cfg(windows)]inner:Arc<win::WindowBridge>, #[cfg(windows)]persist_path:std::path::PathBuf}
 impl OverlayController {
@@ -179,7 +232,7 @@ impl OverlayController {
         #[cfg(not(windows))] let window_ready=false;
         #[cfg(windows)] let map_ready=self.inner.map_ready.load(std::sync::atomic::Ordering::Acquire);
         #[cfg(not(windows))] let map_ready=false;
-        json!({"supported":self.supported(),"window_ready":window_ready,"map_ready":map_ready,"settings":settings})
+        json!({"supported":self.supported(),"window_ready":window_ready,"map_ready":map_ready,"settings":settings,"defaults":OverlaySettings::default()})
     }
     pub fn update(&self,v:&Value)->Result<Value,String>{
         #[cfg(not(windows))]{let _=v;return Err("Native overlay requires Windows".into());}
@@ -325,11 +378,11 @@ mod win {
     fn wide(s:&str)->Vec<u16>{s.encode_utf16().chain(std::iter::once(0)).collect()}
     fn brush(g:*mut c_void,color:u32)->*mut c_void {let mut b=null_mut();unsafe{GdipCreateSolidFill(color,&mut b);}let _=g;b}
     fn fill_circle(g:*mut c_void,x:i32,y:i32,r:i32,color:u32){unsafe{let b=brush(g,color);if !b.is_null(){GdipFillEllipseI(g,b,x-r,y-r,2*r,2*r);GdipDeleteBrush(b);}}}
-    fn triangle(g:*mut c_void,x:f32,y:f32,angle:f32,color:u32){
+    fn triangle(g:*mut c_void,x:f32,y:f32,angle:f32,color:u32,scale:f32){
         let (dx,dy)=(angle.cos(),-angle.sin());let side=(-dy,dx);
-        let points=[Point{x:(x+dx*13.) as i32,y:(y+dy*13.) as i32},
-            Point{x:(x-dx*6.+side.0*6.) as i32,y:(y-dy*6.+side.1*6.) as i32},
-            Point{x:(x-dx*6.-side.0*6.) as i32,y:(y-dy*6.-side.1*6.) as i32}];
+        let points=[Point{x:(x+dx*13.*scale) as i32,y:(y+dy*13.*scale) as i32},
+            Point{x:(x-dx*6.*scale+side.0*6.*scale) as i32,y:(y-dy*6.*scale+side.1*6.*scale) as i32},
+            Point{x:(x-dx*6.*scale-side.0*6.*scale) as i32,y:(y-dy*6.*scale-side.1*6.*scale) as i32}];
         unsafe{let b=brush(g,color);if !b.is_null(){GdipFillPolygonI(g,b,points.as_ptr(),3,0);GdipDeleteBrush(b);}}
     }
     fn argb(hex:&str)->u32 {let rgb=u32::from_str_radix(hex.strip_prefix('#').unwrap_or("3b82f6"),16).unwrap_or(0x3b82f6);0xff000000|rgb}
@@ -505,7 +558,6 @@ mod win {
         let mapdata=&maps["maps"][&game_map]["radar_info"];
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
         unsafe{GdipGraphicsClear(g,0xff10171d);}
-        let local=snap.players.iter().find(|p|p.local&&p.life_state=="alive");
         let focus=snap.radar_focus(cfg.follow_spectator);
         let layer=assets::map_layer_for_height(mapdata,focus.as_ref().map(|p|p.position[2]));
         let mut background_notice=if game_map.is_empty(){Some("Карта не определена. Выберите её на основной карте.")}
@@ -546,20 +598,29 @@ mod win {
             else{Some("Фон карты загружается…")}
         });
         if cfg.show_noise {
-            if let (Some(me),Some(noise))=(local,snap.noise.as_ref()){
-                if let Some((x,y))=screen_point(me.position,(pos_x,pos_y,scale),
-                    width as f32,height as f32,cfg.zoom,center){
-                    let r=(noise.radius_units/(scale*1024.0)*side).clamp(1.0,8000.0);
-                    if r.is_finite()&&r>1.0 {unsafe{
-                        let fill=brush(g,0x1bffbf69);
-                        if !fill.is_null(){GdipFillEllipseI(g,fill,(x-r) as i32,(y-r) as i32,(r*2.0) as i32,(r*2.0) as i32);GdipDeleteBrush(fill);}
-                        let mut pen=null_mut();
-                        if GdipCreatePen1(0xdfffc776,2.0,2,&mut pen)==0&&!pen.is_null(){
-                            GdipDrawEllipseI(g,pen,(x-r) as i32,(y-r) as i32,(r*2.0) as i32,(r*2.0) as i32);
-                            GdipDeletePen(pen);
-                        }
-                    }}
+            for noise in &snap.noise_events {
+                if !assets::position_in_map_layer(mapdata,&layer,noise.position){continue;}
+                let age=noise.age_ms as f32+((crate::model::now_secs()-snap.time).max(0.)*1000.) as f32;
+                let Some(pulse)=crate::noise::pulse_at(age,noise.duration_ms) else{continue;};
+                let Some((x,y))=screen_point(noise.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center) else{continue;};
+                let radius=noise.radius_units/(scale*1024.)*side;
+                if !radius.is_finite()||radius<=0.{continue;}
+                let opacity=pulse.opacity*cfg.noise_opacity as f32/100.;
+                let rgb=argb(&cfg.noise_color)&0x00ff_ffff;
+                let ink=|alpha:f32|rgb|(((alpha*opacity).clamp(0.,255.) as u32)<<24);
+                let front=if cfg.noise_animation{radius*pulse.radius_fraction}else{radius};
+                let mut rings=vec![(front,5.,ink(28.)),(front,2.,ink(235.))];
+                if cfg.noise_animation{
+                    rings.push((front*0.86,1.,ink(80.)));
+                    if cfg.noise_show_range{rings.push((radius,1.,ink(55.)));}
                 }
+                for (r,width,color) in rings{if r>0.5{unsafe{
+                    let mut pen=null_mut();
+                    if GdipCreatePen1(color,width,2,&mut pen)==0&&!pen.is_null(){
+                        GdipDrawEllipseI(g,pen,(x-r).round() as i32,(y-r).round() as i32,(r*2.).round() as i32,(r*2.).round() as i32);
+                        GdipDeletePen(pen);
+                    }
+                }}}
             }
         }
         if cfg.show_sites {
@@ -574,7 +635,7 @@ mod win {
         }
         // Draw world C4 regardless of team filters; keep it in map space,
         // so it follows the same rotation and pan as players and plant sites.
-        if let Some(bomb)=snap.bomb_world.as_ref().filter(|bomb|assets::position_in_map_layer(mapdata,&layer,bomb.position)){
+        if let Some(bomb)=snap.bomb_world.as_ref().filter(|bomb|cfg.show_c4&&assets::position_in_map_layer(mapdata,&layer,bomb.position)){
             if let Some((x,y))=screen_point(bomb.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
                 let px=x.round() as i32;let py=y.round() as i32;
 
@@ -641,7 +702,7 @@ mod win {
         for nade in &snap.grenades{
             if !assets::position_in_map_layer(mapdata,&layer,nade.position){continue;}
             let enabled=(nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire);
-            if nade.state!="active"||!enabled{continue;}
+            if nade.state!="active"||!enabled||!cfg.show_utility_timers{continue;}
             if let Some(remaining)=nade.remaining_secs.filter(|n|n.is_finite()).map(|n|(n-age).max(0.)){
                 if remaining<=0.{continue;}
                 let at=screen_point(nade.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
@@ -652,34 +713,48 @@ mod win {
                 }
             }
         }
+        if cfg.show_noise&&cfg.noise_show_range {
+            if let Some(noise)=snap.noise_events.last().filter(|n|assets::position_in_map_layer(mapdata,&layer,n.position)&&
+                crate::noise::pulse_at(n.age_ms as f32+((crate::model::now_secs()-snap.time).max(0.)*1000.) as f32,n.duration_ms).is_some()){
+                if let Some((x,y,false))=screen_point(noise.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
+                    .and_then(|p|marker_point(p,width as f32,height as f32,camera_angle.unwrap_or(0.))){
+                    label(x,y-if cfg.show_names{48.}else{30.},format!("{} {:.0} м",if noise.kind=="shot"{"≤"}else{"≈"},noise.radius_units*crate::noise::METRES_PER_UNIT),argb(&cfg.noise_color));
+                }
+            }
+        }
         for p in &snap.players {
-            if p.life_state!="alive" {continue;}
+            if !cfg.player_visible(p,snap.local_team){continue;}
             let raw=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){Some(v)=>v,None=>continue};
-            let (x,y,edge)=match marker_point(raw,width as f32,height as f32,camera_angle.unwrap_or(0.)){Some(v)=>v,None=>continue};
+            let (top_padding,bottom_padding)=cfg.marker_padding();
+            let (x,y,edge)=match marker_point_padded(raw,width as f32,height as f32,camera_angle.unwrap_or(0.),top_padding,bottom_padding){Some(v)=>v,None=>continue};
+            if edge&&!cfg.show_offscreen{continue;}
             let col=if p.local {argb(&cfg.self_color)}else if p.team==snap.local_team {argb(&cfg.friend_color)}else {argb(&cfg.enemy_color)};
-            fill_circle(g,x as i32,y as i32,10,0xff071018);
+            let radius=10.*cfg.marker_scale;
+            fill_circle(g,x as i32,y as i32,radius.round() as i32,0xff071018);
             let yaw=if edge {
-                // The edge chevron points to the actual offscreen location.
                 let (sin,cos)=camera_angle.unwrap_or(0.).to_radians().sin_cos();
                 let (dx,dy)=(raw.0-width as f32/2.,raw.1-height as f32/2.);
                 Some((-(dx*sin+dy*cos)).atan2(dx*cos-dy*sin))
-            }else{p.yaw.map(|yaw|(yaw-camera_angle.unwrap_or(0.)).to_radians())};
-            if let Some(yaw)=yaw{triangle(g,x,y,yaw,col);}else{fill_circle(g,x as i32,y as i32,6,col);}
-            if edge{label(x,y-30.,"ДАЛЕКО".into(),0xffc7d9e6);}
-            if Some(p.id)==snap.bomb_carrier_id {fill_circle(g,x as i32-17,y as i32-15,4,0xffffcb70);}
-            if !p.local&&p.team!=snap.local_team{
-                height_arrow(g,x as i32+18,y as i32,crate::model::relative_height(p.position,focus.as_ref().map(|p|p.position)));
+            }else if cfg.show_direction{p.yaw.map(|yaw|(yaw-camera_angle.unwrap_or(0.)).to_radians())}else{None};
+            if let Some(yaw)=yaw{triangle(g,x,y,yaw,col,cfg.marker_scale);}else{fill_circle(g,x as i32,y as i32,(6.*cfg.marker_scale).round() as i32,col);}
+            if cfg.show_names{label(x,y-radius-cfg.text_size as f32-5.,p.name.chars().take(24).collect(),0xfff0f6fc);}
+            else if edge{label(x,y-radius-cfg.text_size as f32-5.,"ЗА КРАЕМ".into(),0xffc7d9e6);}
+            if cfg.show_c4&&Some(p.id)==snap.bomb_carrier_id {fill_circle(g,(x-radius-7.) as i32,(y-radius-5.) as i32,4,0xffffcb70);}
+            if cfg.show_height&&!p.local&&p.team!=snap.local_team{
+                height_arrow(g,(x+radius+8.) as i32,y as i32,crate::model::relative_height(p.position,focus.as_ref().map(|p|p.position)));
             }
-            if p.is_flashed.unwrap_or(p.flash_remaining_secs.is_some_and(|n|n>0.)) {flash_cross(g,x as i32,y as i32);}
-            rectangle(g,x as i32-17,y as i32+13,34,4,0xff15202b);
-            if let Some(hp)=p.health{
-                rectangle(g,x as i32-17,y as i32+13,(34.*(hp as f32/100.).clamp(0.,1.)) as i32,4,if hp<=30{0xffff7373}else{0xff80e5b2});
-                label(x,y+18.,format!("{hp} HP"),0xfff4f8fc);
-            }else{label(x,y+18.,"? HP".into(),0xffb2c3cf);}
+            if cfg.show_flashed&&p.is_flashed.unwrap_or(p.flash_remaining_secs.is_some_and(|n|n>age)) {flash_cross(g,x as i32,y as i32);}
+            let mut row=y+radius+3.;
+            if cfg.show_hp_bar{
+                rectangle(g,x as i32-17,row as i32,34,4,0xff15202b);
+                if let Some(hp)=p.health{rectangle(g,x as i32-17,row as i32,(34.*(hp as f32/100.).clamp(0.,1.)) as i32,4,if hp<=30{0xffff7373}else{0xff80e5b2});}
+                row+=6.;
+            }
+            if cfg.show_hp{label(x,row,p.health.map(|hp|format!("{hp} ХП")).unwrap_or_else(||"? ХП".into()),0xfff4f8fc);row+=cfg.text_size as f32+2.;}
+            if cfg.show_armor{label(x,row,format!("БР {}{}",p.armor,if p.helmet{" · Ш"}else{""}),0xff9ecbff);row+=cfg.text_size as f32+2.;}
             if p.weapon!="—"&&!p.weapon.is_empty(){
-                // Keep the exact weapon name alongside a compact silhouette.
-                weapon_glyph(g,x as i32,y as i32+38,&p.weapon);
-                label(x,y+45.,p.weapon.clone(),0xffd9e8f1);
+                if cfg.show_weapon_icon{weapon_glyph(g,x as i32,(row+7.) as i32,&p.weapon);row+=15.;}
+                if cfg.show_weapon_name{label(x,row,p.weapon.clone(),0xffd9e8f1);}
             }
         }
         } // Valid overview: unknown maps never use another map's geometry.
@@ -697,7 +772,7 @@ mod win {
         }else{None};
         let has_bomb_timer=bomb_lines.is_some();
         BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
-        let no_player_data=reader_notice(&snap.status,snap.players.len(),snap.message.as_deref(),((width-48)/8).max(16) as usize);
+        let no_player_data=reader_notice(&snap.status,snap.players.len(),snap.message.as_deref(),((width-48)/(cfg.text_size as i32*3/5).max(1)).max(16) as usize);
         if let Some(lines)=no_player_data.as_ref().filter(|_|!has_bomb_timer){
             // Below the drag strip/X, visible even when GSI already names a map.
             // An independently validated C4 clock keeps this area when player
@@ -838,7 +913,8 @@ mod win {
                             }
                             SetBkMode(mem,TRANSPARENT);
                             let face=wide("Segoe UI");
-                            let font=CreateFontW(-13,0,0,0,650,0,0,0,1,0,0,5,0,face.as_ptr());
+                            let text_size=GLOBAL.get().and_then(|bridge|bridge.settings.lock().ok().map(|s|s.text_size)).unwrap_or(13);
+                            let font=CreateFontW(-(text_size as i32),0,0,0,650,0,0,0,1,0,0,5,0,face.as_ptr());
                             let previous=if !font.is_null(){Some(SelectObject(mem,font))}else{None};
                             LABELS.with(|labels|for label in labels.borrow().iter(){
                                 let text=wide(&label.text);let len=(text.len()-1) as i32;
@@ -923,6 +999,46 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
+    #[test]fn dense_labels_fit_even_at_the_minimum_window_size(){
+        let mut settings=OverlaySettings::default();assert_eq!(settings.marker_padding(),(65.,72.));
+        settings.show_armor=true;settings.marker_scale=1.75;settings.text_size=18;
+        let (top,bottom)=settings.marker_padding();
+        let (_,y,edge)=marker_point_padded((147.5,100000.),295.,205.,0.,top,bottom).unwrap();
+        assert!(edge&&y>=top&&y+bottom<=205.01);
+        settings.show_hp=false;settings.show_hp_bar=false;settings.show_armor=false;
+        settings.show_weapon_icon=false;settings.show_weapon_name=false;
+        assert!(settings.marker_padding().1<bottom);
+    }
+    #[test]fn minimum_float_settings_roundtrip_without_precision_rejection(){
+        let mut settings=OverlaySettings::default();settings.update(&json!({"zoom":0.35,"marker_scale":0.65})).unwrap();
+        let value=serde_json::to_value(settings).unwrap();let mut restored=OverlaySettings::default();
+        restored.update(&value).unwrap();assert_eq!(restored.zoom,0.35);assert_eq!(restored.marker_scale,0.65);
+    }
+    #[test]fn detailed_player_options_survive_save_reload_and_legacy_configuration(){
+        let mut settings=OverlaySettings::default();
+        settings.update(&json!({"show_hp":false,"show_hp_bar":true,"show_weapon_icon":false,"show_weapon_name":true,
+            "show_names":true,"show_armor":true,"show_height":false,"show_flashed":false,"show_c4":false,
+            "marker_scale":1.4,"text_size":16,"noise_color":"#d0eefe","noise_opacity":45,"noise_animation":false})).unwrap();
+        let saved=serde_json::to_value(&settings).unwrap();let mut restored=OverlaySettings::default();restored.update(&saved).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(),saved);
+        let legacy:OverlaySettings=serde_json::from_value(json!({"visible":true,"zoom":1.5})).unwrap();
+        assert!(legacy.show_hp&&legacy.show_hp_bar&&legacy.show_weapon_icon&&legacy.noise_animation);
+        assert_eq!(legacy.zoom,1.5);
+    }
+    #[test]fn invalid_settings_are_rejected_atomically(){
+        let mut settings=OverlaySettings::default();let original=serde_json::to_value(&settings).unwrap();
+        for patch in [json!({"show_hp":false,"text_size":40}),json!({"show_hp":"yes"}),json!({"marker_scale":0}),
+            json!({"noise_opacity":101}),json!({"noise_color":"red"}),json!({"show_weapon_icon":null}),json!({"unknown":true})]{
+            assert!(settings.update(&patch).is_err());assert_eq!(serde_json::to_value(&settings).unwrap(),original);
+        }
+    }
+    #[test]fn visibility_filters_use_player_roles_and_keep_dead_players_hidden(){
+        let snapshot=crate::model::demo_snapshot(0.);let mut settings=OverlaySettings::default();
+        settings.show_enemies=false;
+        for player in &snapshot.players{if player.team!=snapshot.local_team{assert!(!settings.player_visible(player,snapshot.local_team));}}
+        settings.show_self=false;assert!(!settings.player_visible(snapshot.players.iter().find(|p|p.local).unwrap(),snapshot.local_team));
+        settings.show_enemies=true;assert!(!settings.player_visible(snapshot.players.iter().find(|p|p.life_state=="dead").unwrap(),snapshot.local_team));
+    }
     #[test]fn reader_status_is_independent_of_map_metadata(){
         assert!(reader_notice("live",10,None,30).is_none());
         assert!(reader_notice("demo",7,None,30).is_none());

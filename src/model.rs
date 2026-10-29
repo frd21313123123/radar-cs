@@ -28,13 +28,18 @@ pub struct Player {
     #[serde(default)] pub agent_model: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LocalMotion {
-    pub speed:Option<f32>,pub on_ground:Option<bool>,pub ducking:Option<bool>,pub shots_fired:Option<i32>,pub weapon:Option<String>
+    pub speed:Option<f32>,pub on_ground:Option<bool>,pub ducking:Option<bool>,pub shots_fired:Option<i32>,pub weapon:Option<String>,
+    pub walking:Option<bool>,pub vertical_speed:Option<f32>,pub fall_velocity:Option<f32>,
+    pub step_side:Option<u8>,pub step_sound_time:Option<f32>,pub emit_sound_time:Option<f32>,
+    pub shot_time:Option<f32>,pub silenced:Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoiseState {
-    pub kind:String,pub radius_units:f32,pub approximate:bool,pub age_ms:u32
+    pub kind:String,pub radius_units:f32,pub approximate:bool,pub age_ms:u32,
+    pub event_id:u64,pub position:[f32;3],pub duration_ms:u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BombWorld {
@@ -127,6 +132,7 @@ pub struct Snapshot {
     pub game_map_source: String,
     #[serde(default,skip_serializing_if="Option::is_none")] pub local_motion:Option<LocalMotion>,
     #[serde(default,skip_serializing_if="Option::is_none")] pub noise:Option<NoiseState>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")] pub noise_events:Vec<NoiseState>,
 }
 
 /// A one-step height change is not a separate floor. Never infer a level
@@ -173,7 +179,7 @@ impl Snapshot {
         self.players.clear();self.observer_view=None;self.grenades.clear();
         self.bomb_world=None;self.bomb_timer=None;self.bomb_carrier_id=None;
         self.bomb_carrier_source=None;self.c4_global_owner_id=None;self.c4_unowned=false;
-        self.local_motion=None;self.noise=None;
+        self.local_motion=None;self.noise=None;self.noise_events.clear();
     }
     /// The living local player always takes precedence; when dead, optionally
     /// follow the confirmed observer target (not the corpse position).
@@ -202,7 +208,7 @@ impl Snapshot {
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
-            game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,
+            game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,noise_events:vec![],
         }
     }
 }
@@ -271,7 +277,9 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
           GrenadeView{id:1003,entity_instance:None,kind:"smoke".into(),state:"flying".into(),position:[-1430.,-430.,-110.],radius_units:160.,
              trajectory:vec![[-1680.,-650.,-140.],[-1600.,-560.,-80.],[-1510.,-490.,-95.],[-1430.,-430.,-110.]],fire_cells:vec![],remaining_secs:None,timer_estimated:false}
         ],
-        local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),shots_fired:Some(0),weapon:Some("AK-47".into())}),
+        local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),walking:Some(false),
+            step_side:Some(((t/0.4).floor() as u64%2) as u8),emit_sound_time:Some((t/0.4).floor() as f32*0.4),
+            shots_fired:Some(0),weapon:Some("AK-47".into()),..LocalMotion::default()}),
         bomb_carrier_id:Some(2),bomb_carrier_source:Some("inventory".into()),
         ..Snapshot::status("demo","") }
 }

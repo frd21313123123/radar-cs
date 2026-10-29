@@ -16,6 +16,7 @@ from pathlib import Path
 from threading import Thread
 
 from playwright.sync_api import sync_playwright
+from browser_features import check_noise, check_settings
 
 
 class StalledJSON(BaseHTTPRequestHandler):
@@ -37,7 +38,7 @@ class StalledJSON(BaseHTTPRequestHandler):
         pass
 
 
-def check_browser(url, executable):
+def check_browser(url, executable, screenshots=None):
     with sync_playwright() as playwright:
         options = {"headless": True}
         if executable:
@@ -153,6 +154,8 @@ def check_browser(url, executable):
             a.wait_for_selector(".player", timeout=5000)
             a.wait_for_function("() => !connectionError&&!snapshotStale()")
             print("PASS: hung requests time out, polling retries, and live data recovers")
+            check_noise(a)
+            check_settings(a, screenshots)
             assert not errors, errors
             print("PASS: no browser JavaScript errors")
         finally:
@@ -166,6 +169,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, default=Path("target/debug/cas-external-radar"))
     parser.add_argument("--browser", help="Optional installed Chromium executable")
+    parser.add_argument("--screenshots-dir", type=Path, help="Optional settings screenshots")
     args = parser.parse_args()
     exe = args.exe.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -192,7 +196,8 @@ def main():
                     time.sleep(.05)
                 else:
                     raise AssertionError("Demo server did not start within 10 seconds")
-                check_browser(f"http://127.0.0.1:{port}/?token={match[1]}", args.browser)
+                check_browser(f"http://127.0.0.1:{port}/?token={match[1]}", args.browser,
+                              args.screenshots_dir.resolve() if args.screenshots_dir else None)
             finally:
                 process.terminate()
                 try:
