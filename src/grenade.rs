@@ -1,7 +1,11 @@
 use crate::model::{Snapshot,GrenadeView};
 use std::{collections::HashMap,time::{Duration,Instant}};
 #[derive(Default)]pub struct GrenadeTracker{tracks:HashMap<u32,Trail>,map:String,pid:u32}
-struct Trail{kind:String,points:Vec<[f32;3]>,last:Instant,active_at:Option<Instant>,position:[f32;3],timer_deadline:Option<Instant>,timer_estimated:bool}
+struct Trail{kind:String,instance:Option<(u64,u32)>,missing:bool,points:Vec<[f32;3]>,last:Instant,active_at:Option<Instant>,position:[f32;3],timer_deadline:Option<Instant>,timer_estimated:bool}
+impl Trail{
+ fn new(g:&GrenadeView,now:Instant)->Self{Self{kind:g.kind.clone(),instance:g.entity_instance,missing:false,
+  points:vec![],last:now,active_at:None,position:g.position,timer_deadline:None,timer_estimated:false}}
+}
 impl GrenadeTracker{
  pub fn reset(&mut self){self.tracks.clear();self.map.clear();self.pid=0;}
  pub fn update(&mut self,s:&mut Snapshot,now:Instant,map:&str){
@@ -9,8 +13,15 @@ impl GrenadeTracker{
   self.pid=s.pid;if !map.is_empty(){self.map=map.into();}
   if !s.grenades_read{return;}
   for g in &mut s.grenades{
+   let reused=self.tracks.get(&g.id).is_some_and(|t|
+    t.instance!=g.entity_instance ||
+    // Legacy/demo records lack a generation. An expired estimated effect
+    // observed missing in a scan must not give a new activation a zero timer.
+    (g.entity_instance.is_none()&&t.missing&&t.timer_estimated&&
+     t.timer_deadline.is_some_and(|deadline|now>=deadline)));
+   if reused{self.tracks.remove(&g.id);}
    if g.state=="flying"{
-    let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None,position:g.position,timer_deadline:None,timer_estimated:false});
+    let t=self.tracks.entry(g.id).or_insert_with(||Trail::new(g,now));
     let far=t.points.last().is_some_and(|p|distance(*p,g.position)>1600.);
     if t.kind!=g.kind||far||t.active_at.is_some(){t.kind=g.kind.clone();t.points.clear();t.active_at=None;t.timer_deadline=None;}
     if g.trajectory.len()>=2 {
@@ -27,7 +38,7 @@ impl GrenadeTracker{
     if t.points.len()>40{t.points.drain(0..t.points.len()-40);}
     t.last=now;t.position=g.position;g.trajectory=t.points.clone();
    }else if g.state=="active"{
-    let t=self.tracks.entry(g.id).or_insert_with(||Trail{kind:g.kind.clone(),points:vec![],last:now,active_at:None,position:g.position,timer_deadline:None,timer_estimated:false});
+    let t=self.tracks.entry(g.id).or_insert_with(||Trail::new(g,now));
     if t.kind!=g.kind || distance(t.position,g.position)>1600. {
       t.kind=g.kind.clone();t.points.clear();t.active_at=None;t.timer_deadline=None;
     }
@@ -55,10 +66,11 @@ impl GrenadeTracker{
   // Preserve a completed *observed* path for 700 ms after detonation.
   for (&id,t) in self.tracks.iter(){
    if !ids.contains(&id) && t.points.len()>1 && now.saturating_duration_since(t.last)<Duration::from_millis(700){
-    s.grenades.push(GrenadeView{id,kind:t.kind.clone(),state:"finished".into(),
+    s.grenades.push(GrenadeView{id,entity_instance:t.instance,kind:t.kind.clone(),state:"finished".into(),
       position:*t.points.last().unwrap(),radius_units:0.,trajectory:t.points.clone(),fire_cells:vec![],remaining_secs:None,timer_estimated:false});
    }
   }
+  for (id,t) in &mut self.tracks{t.missing=!ids.contains(id);}
   // Retain activation clocks across transient missing reads; never restart
   // an estimated countdown simply because an entity was absent for a scan.
   self.tracks.retain(|id,t|ids.contains(id)||now.saturating_duration_since(t.last)<
@@ -121,5 +133,32 @@ fn distance(a:[f32;3],b:[f32;3])->f32{((a[0]-b[0]).powi(2)+(a[1]-b[1]).powi(2)+(
   let i=s.grenades.iter().position(|g|g.state=="flying").unwrap();s.grenades[i].trajectory.clear();
   t.update(&mut s,start,"de_mirage");s.grenades[i].position[0]+=100.;s.grenades[i].trajectory.clear();
   t.update(&mut s,start+Duration::from_millis(280),"de_nuke");assert_eq!(s.grenades[i].trajectory.len(),1);
+ }
+ #[test]fn a_new_generation_at_the_same_slot_starts_a_new_countdown(){
+  let mut tracker=GrenadeTracker::default();let at=Instant::now();let mut s=demo_snapshot(0.);
+  s.grenades.retain(|g|g.kind=="molotov");s.grenades[0].entity_instance=Some((0x10000,0x8001));
+  s.grenades[0].remaining_secs=None;tracker.update(&mut s,at,"de_nuke");
+  s.grenades[0].entity_instance=Some((0x10000,0x10001));s.grenades[0].remaining_secs=None;
+  tracker.update(&mut s,at+Duration::from_secs(5),"de_nuke");
+  assert_eq!(s.grenades[0].remaining_secs,Some(7.));
+ }
+ #[test]fn reused_legacy_slot_after_an_expired_missing_effect_gets_a_new_timer(){
+  let mut tracker=GrenadeTracker::default();let at=Instant::now();let mut s=demo_snapshot(0.);
+  s.grenades.retain(|g|g.kind=="molotov");s.grenades[0].remaining_secs=None;
+  tracker.update(&mut s,at,"de_nuke");let first=s.grenades.clone();
+  s.grenades.clear();tracker.update(&mut s,at+Duration::from_secs(8),"de_nuke");
+  s.grenades=first;s.grenades[0].remaining_secs=None;
+  tracker.update(&mut s,at+Duration::from_secs(9),"de_nuke");
+  assert_eq!(s.grenades[0].remaining_secs,Some(7.));
+ }
+ #[test]fn a_known_instance_keeps_its_clock_through_a_missing_scan(){
+  let mut tracker=GrenadeTracker::default();let at=Instant::now();let mut s=demo_snapshot(0.);
+  s.grenades.retain(|g|g.kind=="smoke"&&g.state=="active");
+  s.grenades[0].entity_instance=Some((0x10000,0x8001));s.grenades[0].remaining_secs=None;
+  tracker.update(&mut s,at,"de_nuke");let first=s.grenades.clone();
+  s.grenades.clear();tracker.update(&mut s,at+Duration::from_secs(2),"de_nuke");
+  s.grenades=first;s.grenades[0].remaining_secs=None;
+  tracker.update(&mut s,at+Duration::from_secs(5),"de_nuke");
+  assert_eq!(s.grenades[0].remaining_secs,Some(15.));
  }
 }

@@ -1,8 +1,10 @@
 use serde_json::{Value,json};
 use std::{fs,io::Read,path::{Path,PathBuf},time::{Duration,SystemTime}};
 use crate::model::normalize_map_name;
+use crate::schema::Schema;
+use serde::{Deserialize,Serialize};
 
-pub const OFFSETS_SRC:&str="https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/";
+const SCHEMA_REVISION_URL:&str="https://api.github.com/repos/a2x/cs2-dumper/commits?path=output&per_page=1";
 pub const MAP_SRC:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/data/available.json";
 pub const RADARS:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/images/radars/";
 const UA:&str="CAS-External-Radar-Rust/0.9";
@@ -47,6 +49,117 @@ pub fn cached_json(url:&str,path:&Path,offline:bool,force:bool)->Option<Value>{
         }
     }
     fs::read(path).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
+}
+
+/// The revision and all three documents are persisted together. Loose legacy
+/// cache files cannot establish that their fields belong to the same build.
+#[derive(Serialize,Deserialize)]
+struct SchemaBundle{revision:String,offsets:Value,client:Value,info:Value}
+impl SchemaBundle{
+    fn schema(&self)->Result<Schema,String>{
+        if self.revision.len()!=40||!self.revision.bytes().all(|b|b.is_ascii_hexdigit()){
+            return Err("Invalid schema revision".into());
+        }
+        if !self.info["build_number"].as_u64().is_some_and(|n|n>0){
+            return Err("Missing schema build number".into());
+        }
+        Schema::from_json(&self.offsets,&self.client,self.info.clone())
+    }
+}
+fn fetch_schema_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
+    let commits=fetch(SCHEMA_REVISION_URL)?;
+    let revision=commits[0]["sha"].as_str().filter(|sha|
+        sha.len()==40&&sha.bytes().all(|b|b.is_ascii_hexdigit())).ok_or("Missing schema commit")?.to_owned();
+    let base=format!("https://raw.githubusercontent.com/a2x/cs2-dumper/{revision}/output");
+    let bundle=SchemaBundle{revision,offsets:fetch(&format!("{base}/offsets.json"))?,
+        client:fetch(&format!("{base}/client_dll.json"))?,info:fetch(&format!("{base}/info.json"))?};
+    bundle.schema()?;Ok(bundle)
+}
+fn load_schema_with(cache:&Path,offline:bool,mut fetch:impl FnMut(&str)->Result<Value,String>)->Result<Schema,String>{
+    let path=cache.join("schema-bundle.json");
+    let previous=fs::read(&path).ok().and_then(|b|serde_json::from_slice::<SchemaBundle>(&b).ok())
+        .and_then(|bundle|bundle.schema().ok());
+    if !offline{
+        match fetch_schema_bundle(&mut fetch){
+            Ok(bundle)=>{
+                let schema=bundle.schema()?;
+                if let Ok(bytes)=serde_json::to_vec(&bundle){
+                    let temporary=path.with_extension(format!("{}.part",std::process::id()));
+                    let saved=fs::create_dir_all(cache).and_then(|_|fs::write(&temporary,bytes)).and_then(|_|fs::rename(&temporary,&path));
+                    if saved.is_err(){let _=fs::remove_file(temporary);eprintln!("[schema] Could not save the complete schema bundle; keeping the previous cache");}
+                }
+                return Ok(schema);
+            }
+            Err(error)=>eprintln!("[schema] Complete update unavailable: {error}; using the previous complete bundle"),
+        }
+    }
+    previous.ok_or_else(||"No valid offsets bundle; connect once to download a consistent schema-bundle.json".into())
+}
+pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
+    load_schema_with(cache,offline,|url|download(url,2_000_000)
+        .and_then(|bytes|serde_json::from_slice(&bytes).map_err(|e|e.to_string())))
+}
+
+#[cfg(test)]mod schema_bundle_tests{
+    use super::*;
+    fn fixture(revision:&str,build:u64,health:u64)->SchemaBundle{
+        SchemaBundle{revision:revision.repeat(40),info:json!({"build_number":build}),
+            offsets:json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16}}),
+            client:json!({"client.dll":{"classes":{
+                "CCSPlayerController":{"fields":{"m_hPlayerPawn":32}},
+                "C_BaseEntity":{"fields":{"m_iTeamNum":16,"m_iHealth":health,"m_pGameSceneNode":40}},
+                "CGameSceneNode":{"fields":{"m_vecAbsOrigin":16}}
+            }}})}
+    }
+    fn cache()->PathBuf{
+        static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+        let path=std::env::temp_dir().join(format!("radar-bundle-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+        fs::create_dir_all(&path).unwrap();path
+    }
+    fn remote(bundle:SchemaBundle,fail:Option<&str>)->impl FnMut(&str)->Result<Value,String>+'_ {
+        move |url|{
+            if url==SCHEMA_REVISION_URL{return Ok(json!([{"sha":bundle.revision}]));}
+            if fail.is_some_and(|name|url.ends_with(name)){return Err("HTTP 503".into());}
+            if url.ends_with("/offsets.json"){Ok(bundle.offsets.clone())}
+            else if url.ends_with("/client_dll.json"){Ok(bundle.client.clone())}
+            else if url.ends_with("/info.json"){Ok(bundle.info.clone())}
+            else{Err("unexpected URL".into())}
+        }
+    }
+    #[test]fn partial_refresh_keeps_the_whole_previous_build(){
+        for failed in ["offsets.json","client_dll.json","info.json"]{
+            let cache=cache();let previous=serde_json::to_vec(&fixture("a",101,20)).unwrap();
+            fs::write(cache.join("schema-bundle.json"),&previous).unwrap();
+            let schema=load_schema_with(&cache,false,remote(fixture("b",102,36),Some(failed))).unwrap();
+            assert_eq!(schema.info["build_number"],101);assert_eq!(schema.field("C_BaseEntity","m_iHealth"),Some(20));
+            assert_eq!(fs::read(cache.join("schema-bundle.json")).unwrap(),previous);
+            fs::remove_dir_all(cache).unwrap();
+        }
+    }
+    #[test]fn complete_refresh_is_revision_pinned_and_reusable_offline(){
+        let cache=cache();let mut urls=Vec::new();let mut fetch=remote(fixture("b",102,36),None);
+        let schema=load_schema_with(&cache,false,|url|{urls.push(url.to_owned());fetch(url)}).unwrap();
+        assert_eq!(schema.info["build_number"],102);assert_eq!(schema.field("C_BaseEntity","m_iHealth"),Some(36));
+        assert_eq!(urls.len(),4);
+        assert!(urls.iter().skip(1).all(|url|url.contains(&format!("/{}/output/","b".repeat(40)))));
+        let offline=load_schema_with(&cache,true,|_|panic!("offline load made a network request")).unwrap();
+        assert_eq!(offline.field("C_BaseEntity","m_iHealth"),Some(36));fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn invalid_new_schema_cannot_replace_a_valid_bundle(){
+        let cache=cache();let previous=serde_json::to_vec(&fixture("a",101,20)).unwrap();
+        fs::write(cache.join("schema-bundle.json"),&previous).unwrap();
+        let mut broken=fixture("b",102,36);broken.client=json!({});
+        assert_eq!(load_schema_with(&cache,false,remote(broken,None)).unwrap().info["build_number"],101);
+        assert_eq!(fs::read(cache.join("schema-bundle.json")).unwrap(),previous);fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn loose_legacy_files_do_not_establish_a_consistent_offline_build(){
+        let cache=cache();let old=fixture("a",101,20);
+        for (name,value) in [("offsets",old.offsets),("client_dll",old.client),("info",old.info)]{
+            fs::write(cache.join(format!("{name}.json")),value.to_string()).unwrap();
+        }
+        assert!(load_schema_with(&cache,true,|_|panic!("offline network request")).is_err());
+        fs::remove_dir_all(cache).unwrap();
+    }
 }
 /// Normalized positions taken from CS2 overview metadata (October 2026).
 /// Coordinates are fractions of the 1024x1024 radar image, not world units.
@@ -137,8 +250,31 @@ pub fn map_layer_for_height(radar_info:&Value,height:Option<f32>)->String{
     "default".into()
 }
 
-// A signature alone accepts a truncated cache file that Windows cannot decode.
-// Check bounded chunk framing and the image header before persisting/reusing PNGs.
+pub fn position_in_map_layer(radar_info:&Value,layer:&str,position:[f32;3])->bool{
+    if !position.iter().all(|v|v.is_finite()){return false;}
+    let bounds=&radar_info["verticalsections"][layer];
+    match (bounds["AltitudeMin"].as_f64(),bounds["AltitudeMax"].as_f64()){
+        (Some(min),Some(max)) if min.is_finite()&&max.is_finite()&&min<max=>
+            position[2] as f64>=min&&(position[2] as f64)<max,
+        _=>true,
+    }
+}
+
+#[cfg(test)]mod utility_layer_tests{
+    use super::*;
+    #[test]fn utility_uses_the_selected_floor_with_an_exclusive_upper_boundary(){
+        let maps=fallback_maps();let info=&maps["maps"]["de_nuke"]["radar_info"];
+        assert!(!position_in_map_layer(info,"default",[0.,0.,-1000.]));
+        assert!(position_in_map_layer(info,"lower",[0.,0.,-1000.]));
+        assert!(!position_in_map_layer(info,"lower",[0.,0.,-495.]));
+        assert!(position_in_map_layer(info,"default",[0.,0.,-495.]));
+        assert!(position_in_map_layer(&maps["maps"]["de_mirage"]["radar_info"],"default",[0.,0.,-1000.]));
+        assert!(!position_in_map_layer(info,"default",[0.,0.,f32::NAN]));
+    }
+}
+
+// Framing alone cannot detect damaged IDAT data. Decode within bounded memory
+// before returning a cached/downloaded image to the browser or Windows GDI+.
 fn valid_map_png(bytes:&[u8])->bool{
     if bytes.len()>8_000_000 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n"){return false;}
     let mut at=8usize;let mut header=false;let mut pixels=false;
@@ -155,10 +291,28 @@ fn valid_map_png(bytes:&[u8])->bool{
             header=true;
         } else if kind==b"IHDR" {return false;}
         if kind==b"IDAT"{pixels=true;}
-        if kind==b"IEND"{return len==0&&header&&pixels&&end==bytes.len();}
+        if kind==b"IEND"{
+            if len!=0||!header||!pixels||end!=bytes.len(){return false;}
+            let decoder=png::Decoder::new_with_limits(std::io::Cursor::new(bytes),png::Limits{bytes:64*1024*1024});
+            let Ok(mut reader)=decoder.read_info() else{return false;};
+            let size=reader.output_buffer_size();
+            if size>64*1024*1024{return false;}
+            return reader.next_frame(&mut vec![0;size]).is_ok()&&reader.finish().is_ok();
+        }
         at=end;
     }
     false
+}
+
+#[cfg(test)]mod png_integrity_tests{
+    use super::*;
+    #[test]fn broken_compressed_pixels_are_rejected_despite_complete_chunk_framing(){
+        let mut broken=include_bytes!("../assets/bomb_ground.png").to_vec();let mut at=8;
+        while &broken[at+4..at+8]!=b"IDAT"{at+=12+u32::from_be_bytes(broken[at..at+4].try_into().unwrap()) as usize;}
+        broken[at+8]=0;
+        assert!(!valid_map_png(&broken));
+        assert!(refreshed_map_image(None,Ok(broken)).is_err());
+    }
 }
 
 fn refreshed_map_image(cached:Option<Vec<u8>>,downloaded:Result<Vec<u8>,String>)->Result<(Vec<u8>,bool),String>{

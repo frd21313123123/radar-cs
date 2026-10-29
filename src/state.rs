@@ -30,6 +30,7 @@ impl SharedState {
     pub fn current_map(&self)->&str{self.manual_map.as_deref().unwrap_or(&self.map)}
     pub fn snapshot(&self)->Snapshot{
         let mut s=self.snap.clone();
+        s.expire_stale_data(crate::model::now_secs());
         s.game_map=self.current_map().into();
         s.game_map_source=if self.manual_map.is_some(){"manual".into()}else{self.map_source.clone()};
         if let Some(d)=s.diagnostics.as_object_mut(){
@@ -56,5 +57,15 @@ impl SharedState {
         assert_eq!(s.snapshot().game_map_source,"gsi");
         assert!(s.set_manual_map(Some("../bad")).is_err());assert!(s.set_manual_map(Some("de_nonexistent")).is_err());
         assert_eq!(s.current_map(),"de_dust2");
+    }
+    #[test]fn stalled_reader_does_not_expose_old_positions_or_timers(){
+        let mut s=SharedState::new(fallback_maps());s.set_map("de_nuke","memory");
+        s.snap=crate::model::demo_snapshot(0.);s.snap.status="live".into();s.snap.time-=10.;
+        let expired=s.snapshot();
+        assert_eq!(expired.status,"stale");assert_eq!(expired.game_map,"de_nuke");
+        assert!(expired.players.is_empty());assert!(expired.grenades.is_empty());
+        assert!(expired.bomb_timer.is_none());assert!(expired.bomb_world.is_none());
+        assert!(expired.radar_focus(true).is_none());assert_eq!(expired.source_hz,0.);
+        assert!(!s.snap.players.is_empty(),"view expiry must not modify the producer's state");
     }
 }

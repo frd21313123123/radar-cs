@@ -211,6 +211,7 @@ let maps={},map='',layer='default',autoMapEnabled=true,snapshot={status:'startin
 let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
 let mapImageError='',mapSelectionError='',mapSelectionPending=false;
+let mapSelectionVersion=0,connectionError='',lastStale=null;
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='',snapshotReceivedAt=0;
 const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true};
@@ -250,10 +251,19 @@ function relativeHeight(position,reference){
  const dz=position[2]-reference[2];return dz>64?1:dz< -64?-1:0;
 }
 function snapshotAge(now=performance.now()){return Math.max(0,(now-snapshotReceivedAt)/1000);}
+function snapshotStale(now=performance.now()){
+ return snapshot.status==='stale'||(['live','partial','demo','no_players'].includes(snapshot.status)
+   &&(!Number.isFinite(snapshot.time)||snapshotAge(now)>=2));
+}
+async function fetchJSON(route,options={},timeout=1500){
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);
+ try{const response=await fetch(api(route),{...options,signal:controller.signal});return {response,data:await response.json()};}
+ finally{clearTimeout(timer);}
+}
 function remainingEffect(effect,now=performance.now()){
  return Number.isFinite(effect?.remaining_secs)?Math.max(0,effect.remaining_secs-snapshotAge(now)):null;
 }
-function isFlashed(p,now=performance.now()){return typeof p.is_flashed==='boolean'?p.is_flashed:Number.isFinite(p.flash_remaining_secs)&&p.flash_remaining_secs>snapshotAge(now);}
+function isFlashed(p,now=performance.now()){return !snapshotStale(now)&&(typeof p.is_flashed==='boolean'?p.is_flashed:Number.isFinite(p.flash_remaining_secs)&&p.flash_remaining_secs>snapshotAge(now));}
 function drawFlashCross(x,y){
  ctx.save();ctx.strokeStyle='#0b141e';ctx.lineWidth=5;ctx.lineCap='round';
  const stroke=()=>{ctx.beginPath();for(const [a,b] of [[-1,-1],[1,-1]]){const c=-a,d=-b;ctx.moveTo(x+a*9,y+b*9);ctx.lineTo(x+c*9,y+d*9);ctx.moveTo(x+c*9-c*5,y+d*9);ctx.lineTo(x+c*9,y+d*9);ctx.lineTo(x+c*9,y+d*9-d*5);}ctx.stroke();};
@@ -304,13 +314,10 @@ async function loadMapImage(){
  img.onerror=()=>{if(key===lastMapImageKey){mapImg=null;mapImageError='Изображение карты недоступно. Проверьте подключение; координаты показаны на сетке.';updateStatus();}};
  img.src=api('/api/map-image?map='+encodeURIComponent(map)+'&layer='+encodeURIComponent(layer));}
 function applyMapState(data){
- if(!mapSelectionPending&&data.game_map_source==='manual'&&data.game_map&&maps[data.game_map]){
-   autoMapEnabled=false;if(map!==data.game_map)setMap(data.game_map);
- }
- else if(autoMapEnabled){
-   if(data.game_map&&maps[data.game_map]){if(map!==data.game_map)setMap(data.game_map);}
-   else if(map)clearMap();
- }
+ if(mapSelectionPending)return;
+ autoMapEnabled=data.game_map_source!=='manual';
+ if(data.game_map&&maps[data.game_map]){if(map!==data.game_map)setMap(data.game_map);}
+ else if(map)clearMap();
  $('autoMapBtn').classList.toggle('active',autoMapEnabled);
  $('autoMapBtn').setAttribute('aria-pressed',String(autoMapEnabled));
  $('autoMapBtn').title=autoMapEnabled
@@ -319,12 +326,13 @@ function applyMapState(data){
 }
 async function selectSharedMap(value){
  if(mapSelectionPending)return;
+ mapSelectionVersion++;
  const previousAuto=autoMapEnabled;
  mapSelectionPending=true;mapSelectionError='';autoMapEnabled=false;
  $('mapSelect').disabled=true;$('autoMapBtn').disabled=true;updateStatus();
  try{
-   const res=await fetch(api('/api/map-selection'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map:value})});
-   const data=await res.json();if(!res.ok)throw Error(data.error||'HTTP '+res.status);
+   const {response:res,data}=await fetchJSON('/api/map-selection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map:value})},4000);
+   if(!res.ok)throw Error(data.error||'HTTP '+res.status);
    if(value!==null&&(!data.game_map||!maps[data.game_map]))throw Error('Сервер не подтвердил выбор карты');
    autoMapEnabled=value===null;
    snapshot={...snapshot,game_map:data.game_map||'',game_map_source:data.game_map_source||''};
@@ -335,7 +343,7 @@ async function selectSharedMap(value){
    mapSelectionError='Не удалось синхронизировать карту с мини-картой: '+e.message;
    applyMapState(snapshot);
  }finally{
-   mapSelectionPending=false;$('mapSelect').disabled=false;$('autoMapBtn').disabled=false;updateStatus();
+   mapSelectionPending=false;applyMapState(snapshot);$('mapSelect').disabled=false;$('autoMapBtn').disabled=false;updateStatus();
  }
 }
 function transform(p){const d=mapData().radar_info||{};const k=Number(d.scale)||5;const x=Number(d.pos_x)||0,y=Number(d.pos_y)||0;
@@ -344,8 +352,8 @@ function transform(p){const d=mapData().radar_info||{};const k=Number(d.scale)||
   return {x:(p[0]-x)/(k*1024),y:(y-p[1])/(k*1024)};}
 function xy(p){let q=transform(p);let side=baseSide*scale;return {x:rect.width/2-side/2+panX+q.x*side,y:rect.height/2-side/2+panY+q.y*side};}
 function inLayer(p){const d=mapData().radar_info?.verticalsections;if(!d||!d[layer])return true;let a=d[layer];
-return p[2]>=Number(a.AltitudeMin??-1e9)&&p[2]<=Number(a.AltitudeMax??1e9);}
-function shown(){return (snapshot.players||[]).filter(p=>playerVisible(p)&&(p.team===2?t:p.team===3?ct:false));}
+return p[2]>=Number(a.AltitudeMin??-1e9)&&p[2]<Number(a.AltitudeMax??1e9);}
+function shown(){return snapshotStale()?[]:(snapshot.players||[]).filter(p=>playerVisible(p)&&(p.team===2?t:p.team===3?ct:false));}
 function fit(){const b=wrap.getBoundingClientRect();rect.width=b.width;rect.height=b.height;
  const dpr=Math.min(devicePixelRatio||1,1.5);
  for(const el of [radar,mapBase]){el.width=Math.max(1,Math.floor(rect.width*dpr));el.height=Math.max(1,Math.floor(rect.height*dpr));}
@@ -363,7 +371,8 @@ function renderBackground(){
 function blend(a,b,t){return a.map((v,i)=>v+(b[i]-v)*t);}
 function smoothedPosition(p,now){const m=motions.get(p.id);if(!m)return p.position;
  const t=Math.max(0,Math.min(1,(now-m.at)/motionMs));return blend(m.from,m.to,t);}
-function acceptSnapshot(data){
+function acceptSnapshot(data,syncMap=true){
+ if(!syncMap)data={...data,game_map:snapshot.game_map,game_map_source:snapshot.game_map_source};
  const now=performance.now();const changed=lastSampleId!==data.time;
  if(changed){motionMs=Math.min(180,Math.max(65,now-lastSampleAt||120));
    const next=new Map();for(const p of data.players||[]){
@@ -384,7 +393,7 @@ function smoothedYaw(p,now){const m=motions.get(p.id);if(!m||!Number.isFinite(m.
 function smoothShown(now){return shown().filter(p=>p.position).map(p=>({...p,position:smoothedPosition(p,now),yaw:smoothedYaw(p,now)}));}
 function updateBombCountdown(){
  const panel=$('bombTimerPanel'),bomb=snapshot.bomb_timer;
- if(!prefs.showBombTimer||!bomb||!Number.isFinite(bomb.remaining_secs)
+ if(snapshotStale()||!prefs.showBombTimer||!bomb||!Number.isFinite(bomb.remaining_secs)
    ||!Number.isFinite(bomb.total_secs)||bomb.total_secs<=0){
    panel.hidden=true;return;
  }
@@ -404,11 +413,13 @@ function updateBombCountdown(){
 }
 function draw(now){requestAnimationFrame(draw);
  if(now-lastDraw<16)return;
- lastDraw=now;updateBombCountdown();fpsFrames++;
+ lastDraw=now;
+ const stale=snapshotStale(now);if(stale!==lastStale){lastStale=stale;updateStatus();repaintPlayers();}
+ updateBombCountdown();fpsFrames++;
  if(now-fpsBegin>=1000){$('fpsHud').textContent='FPS '+Math.round(fpsFrames*1000/(now-fpsBegin));fpsFrames=0;fpsBegin=now;}
  renderBackground();
  const w=rect.width,h=rect.height;ctx.clearRect(0,0,w,h);
- if(!mapKnown())return;
+ if(!mapKnown()||stale)return;
  const size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
  ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
  const people=smoothShown(now),reference=referencePosition();
@@ -442,6 +453,7 @@ function draw(now){requestAnimationFrame(draw);
    if(!zoneEnabled&&!prefs.showPaths)continue;
    const pos=g.position;
    if(!Array.isArray(pos)||pos.length!==3||!pos.every(Number.isFinite))continue;
+   if(!inLayer(pos))continue;
    const fire=g.kind==='molotov',color=({smoke:'#9ae2f1',molotov:'#ffa268',flash:'#f7f7ff',he:'#f66a68',decoy:'#8def88'}[g.kind]||'#c5cbd1');
    if(prefs.showPaths&&Array.isArray(g.trajectory)&&g.trajectory.length>1){
      const points=g.trajectory.filter(p=>Array.isArray(p)&&p.length===3&&p.every(Number.isFinite)).map(xy);
@@ -460,7 +472,7 @@ function draw(now){requestAnimationFrame(draw);
        ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.fill();ctx.stroke();ctx.restore();
        if(fire&&Array.isArray(g.fire_cells)){
          for(const cell of g.fire_cells){
-           if(!Array.isArray(cell)||cell.length!==3||!cell.every(Number.isFinite))continue;
+           if(!Array.isArray(cell)||cell.length!==3||!cell.every(Number.isFinite)||!inLayer(cell))continue;
            const f=xy(cell),r=Math.max(38/k/1024*size,2);
            ctx.save();ctx.fillStyle='rgba(255,91,43,.28)';ctx.beginPath();
            ctx.arc(f.x,f.y,r,0,Math.PI*2);ctx.fill();ctx.restore();
@@ -545,8 +557,8 @@ function playerCard(p){
  <div class="card-inventory" aria-label="Полный инвентарь">${inventory.length?inventory.map(v=>equipmentIcon(v,v===p.weapon?'active':'')).join(''):'<span class="card-muted">Инвентарь не получен</span>'}</div>
  <div class="card-bottom">${equipmentIcon('Armor')}<span title="Количество брони">${p.armor==null?'?':Number(p.armor)||0}</span>${p.helmet?equipmentIcon('Helmet'):''}${p.defuser?equipmentIcon('Defuse Kit'):''}<span class="cash">${p.money==null?'$ —':'$ '+(Number(p.money)||0).toLocaleString('ru-RU')}</span></div></div>`;
 }
-function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
- const listKey=JSON.stringify([selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_world,snapshot.bomb_carrier_source,
+function repaintPlayers(){const stale=snapshotStale(),all=stale?[]:snapshot.players||[],list=visiblePlayers();
+ const listKey=JSON.stringify([stale,selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_world,snapshot.bomb_carrier_source,
    list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory,p.agent_model,isFlashed(p),relativeHeight(p.position,referencePosition())])]);
  if(listKey===lastListKey)return;lastListKey=listKey;
  $('playerCount').textContent=String(all.filter(playerVisible).length).padStart(2,'0');
@@ -556,7 +568,7 @@ function repaintPlayers(){const all=snapshot.players||[],list=visiblePlayers();
  $('tStatus').textContent=localTeam()===2?'ВАША КОМАНДА':'TERRORISTS';
  $('ctStatus').textContent=localTeam()===3?'ВАША КОМАНДА':'COUNTER-TERRORISTS';
  const carrier=all.find(isCarrier);
- $('bombStatus').textContent=snapshot.bomb_world?
+ $('bombStatus').textContent=stale?'C4 · нет свежих данных':snapshot.bomb_world?
     (snapshot.bomb_world.status==='planted'?'▣ C4 · УСТАНОВЛЕНА':'▣ C4 · НА ЗЕМЛЕ'):
     carrier?'▣ '+(carrier.c4_source==='recent'?'C4?':'C4')+' · '+(carrier.name||'Player'):
     'C4 · носитель не подтверждён';
@@ -577,6 +589,14 @@ function diagnosis(){
    '\nНажми DIAG, чтобы скопировать подробную диагностику.';
 }
 function updateStatus(){
+ if(connectionError||snapshotStale()){
+   $('statusText').textContent=connectionError?'DISCONNECTED':'STALE / НЕТ ОБНОВЛЕНИЙ';
+   $('statusDot').className='dot '+(connectionError?'error':'warning');
+   $('sourceHud').textContent='DATA — Hz';$('liveInd').style.color='#ffb566';
+   $('footerText').textContent='НЕТ АКТУАЛЬНЫХ ДАННЫХ';
+   setNotice(connectionError?'Соединение с CAS Radar потеряно: '+connectionError:'Данные CS2 не обновляются. Проверьте радар и подключение к игре.');
+   return;
+ }
  const v=snapshot.status, live=v==='live', partial=v==='partial', demo=v==='demo', empty=v==='no_players';
  $('statusDot').className='dot '+(live||demo?'live':partial||empty?'warning':v==='error'?'error':'');
  $('statusText').textContent=live?'LIVE / '+(snapshot.players||[]).length+' PLAYERS':
@@ -604,11 +624,12 @@ function updateStatus(){
  else if(live||demo){setNotice('');}
 }
 
-async function poll(){try{const r=await fetch(api('/api/state'),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);acceptSnapshot(await r.json());updateStatus();repaintPlayers();}
-catch(e){$('statusText').textContent='DISCONNECTED';$('statusDot').className='dot error';setNotice('Соединение с CAS Radar потеряно: '+e.message);}setTimeout(poll,75);}
+async function poll(){const selectionVersion=mapSelectionVersion,selectionPending=mapSelectionPending;
+try{const {response:r,data}=await fetchJSON('/api/state',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);acceptSnapshot(data,!selectionPending&&selectionVersion===mapSelectionVersion);connectionError='';updateStatus();repaintPlayers();}
+catch(e){connectionError=e.name==='AbortError'?'Превышено время ожидания':e.message;updateStatus();}setTimeout(poll,75);}
 async function init(){loadPrefs();fit();window.addEventListener('resize',fit);
   // The radar container may change size without a browser window resize.
-  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const r=await fetch(api('/api/maps'));if(!r.ok)throw Error('Map list HTTP '+r.status);maps=(await r.json()).maps||{};
+  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const {response:r,data}=await fetchJSON('/api/maps',{},4000);if(!r.ok)throw Error('Map list HTTP '+r.status);maps=data.maps||{};
   let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale).sort();$('mapSelect').innerHTML='<option value="">Выберите карту…</option>'+keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
   clearMap();
 }catch(e){setNotice('Не удалось получить список карт: '+e.message);}poll();requestAnimationFrame(draw);}

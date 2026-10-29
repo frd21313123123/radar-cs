@@ -12,7 +12,8 @@ fn weapon_name(id:u16)->String {
     28=>"Negev",29=>"Sawed-Off",30=>"Tec-9",31=>"Zeus x27",32=>"P2000",33=>"MP7",34=>"MP9",
     35=>"Nova",36=>"P250",38=>"SCAR-20",39=>"SG 553",40=>"SSG 08",42=>"Knife",43=>"Flashbang",
     44=>"HE Grenade",45=>"Smoke",46=>"Molotov",47=>"Decoy",48=>"Incendiary",49=>"C4",
-    59=>"Knife",60=>"M4A1-S",61=>"USP-S",63=>"CZ75-Auto",64=>"R8 Revolver",_=>return format!("Item #{id}")};
+    41|59|80|500|503|505..=509|512|514..=523|525|526=>"Knife",
+    60=>"M4A1-S",61=>"USP-S",63=>"CZ75-Auto",64=>"R8 Revolver",_=>return format!("Item #{id}")};
     name.into()
 }
 fn field(s:&Schema,k:&str,n:&str)->Result<u64,String>{s.field(k,n).ok_or(format!("missing field {k}.{n}"))}
@@ -39,14 +40,28 @@ fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Op
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
-pub struct CS2Reader {pub schema:Schema, layout:Layout, layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
+pub struct CS2Reader {pub schema:Schema, original_schema:Schema, process:Option<(u32,u64)>,layout:Layout, layout_source:u64,layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
 impl CS2Reader {
-    pub fn new(schema:Schema)->Self{Self{schema,layout:Layout::new(0),layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
+    pub fn new(schema:Schema)->Self{Self{original_schema:schema.clone(),schema,process:None,layout:Layout::new(0),layout_source:0,layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
+    pub fn reset(&mut self){
+        self.schema=self.original_schema.clone();self.process=None;
+        self.layout=Layout::new(0);self.layout_source=0;self.layout_at=None;self.probes=0;
+        self.chunk_cache.clear();self.recovery_at=None;self.runtime_offsets=false;self.planted_entity=None;
+    }
     pub fn failure_diagnostics(&self)->serde_json::Value{self.failure_diagnostics.clone()}
     fn probe_layout<M:Memory>(&mut self,p:&mut M,list:u64,offset_addr:u64,local:u64){
         let now=Instant::now();
-        if self.layout.confirmed && self.layout.root==list{return;}
-        if self.layout.root!=0 && self.layout_at.is_some_and(|v|now.duration_since(v)<Duration::from_secs(3)){return;}
+        if self.layout_source!=list{
+            self.layout=Layout::new(list);self.layout_source=list;self.layout_at=None;self.chunk_cache.clear();
+        }
+        if self.layout.confirmed{
+            // The local controller can disappear while spectating. Retain a
+            // verified stride, but invalidate it immediately on a mismatch.
+            if local==0{return;}
+            if self.layout.slot.map(|slot|self.entity(p,self.layout.root,slot))==Some(local){return;}
+            self.layout.confirmed=false;self.layout_at=None;self.chunk_cache.clear();
+        }
+        if self.layout_at.is_some_and(|v|now.duration_since(v)<Duration::from_secs(3)){return;}
         self.layout_at=Some(now);self.probes=0;self.layout=Layout::new(list);
         if local==0{return;}
         let mut roots=vec![list,offset_addr,p.u64(list)]; roots.retain(|v|*v!=0);roots.sort_unstable();roots.dedup();
@@ -383,6 +398,11 @@ impl CS2Reader {
                     let pos=if node>=0x10000{p.vec3(node+origin_off)}else{None};
                     let pos=match pos{Some(v)=>v,None=>continue};
                     let index=(first+i) as u32;
+                    // CEntityIdentity's full handle includes its generation.
+                    // Keep this internal: clients only need the public slot ID.
+                    let handle=try_i32(p,ident+0x10).map(|v|v as u32)
+                        .filter(|h|*h!=u32::MAX&&(*h&0x7fff)==index).unwrap_or(index);
+                    let entity_instance=Some((ptr,handle));
                     if kind=="inferno"{
                         let count_off=match self.schema.field("C_Inferno","m_fireCount"){Some(v)=>v,None=>continue};
                         let fire_count=p.i32(ptr+count_off);
@@ -407,7 +427,7 @@ impl CS2Reader {
                         let begin=self.schema.field("C_Inferno","m_nFireEffectTickBegin").and_then(|off|try_i32(p,ptr+off));
                         let lifetime=self.schema.field("C_Inferno","m_nFireLifetime").and_then(|off|try_f32(p,ptr+off));
                         let remaining_secs=effect_remaining(begin,current_time,lifetime.unwrap_or(7.));
-                        out.push(GrenadeView{id:index,kind:"molotov".into(),state:"active".into(),
+                        out.push(GrenadeView{id:index,entity_instance,kind:"molotov".into(),state:"active".into(),
                             position:center,radius_units:radius.clamp(45.,250.),trajectory:vec![],fire_cells:cells,
                             remaining_secs,timer_estimated:lifetime.is_none()});
                     }else{
@@ -431,7 +451,7 @@ impl CS2Reader {
                         let begin=if active {self.schema.field("C_SmokeGrenadeProjectile","m_nSmokeEffectTickBegin")
                             .and_then(|off|try_i32(p,ptr+off))}else{None};
                         let remaining_secs=effect_remaining(begin,current_time,20.);
-                        out.push(GrenadeView{id:index,kind:kind.into(),state:if active{"active"}else{"flying"}.into(),
+                        out.push(GrenadeView{id:index,entity_instance,kind:kind.into(),state:if active{"active"}else{"flying"}.into(),
                             position,radius_units:if kind=="smoke"{160.}else{135.},trajectory:points,fire_cells:vec![],
                             remaining_secs,timer_estimated:false});
                     }
@@ -521,6 +541,7 @@ impl CS2Reader {
         None
     }
     pub fn snapshot<M:Memory>(&mut self,p:&mut M,base:u64,engine:u64,pid:u32,details:bool,grenade_scan:bool)->Result<Snapshot,String>{
+        if self.process!=Some((pid,base)){self.reset();self.process=Some((pid,base));}
         let start=Instant::now();self.chunk_cache.clear();
         let before_read=p.read_count();let before_fail=p.fail_count();
         let mut diag=Diagnostics::default();
@@ -532,14 +553,14 @@ impl CS2Reader {
             .and_then(|off|try_i32(p,engine+off)).filter(|b|*b>0)}else{None};
         diag.set("game_build",json!(build));
         diag.set("offsets_match_game",json!(build.and_then(|b|self.schema.info["build_number"].as_u64().map(|n|n==b as u64))));
-        let list_off=self.schema.offset("dwEntityList").ok_or("Missing dwEntityList")?;
+        let mut list_off=self.schema.offset("dwEntityList").ok_or("Missing dwEntityList")?;
         let mut read=try_u64(p,base+list_off);
         // Keep the first failure, since scanning may make other memory reads.
         let read_error=if read.is_none(){p.last_error()}else{0};
         diag.set("entity_list_initial_read_ok",json!(read.is_some()));
         diag.set("entity_list_initial_win32_error",json!(read_error));
         let secondary_unavailable=read.is_some_and(valid_pointer)&&
-            ((self.game_time(p,base).is_none()&&self.current_map(p,base).is_none())||self.local_pawn_invalid(p,base));
+            (self.game_time(p,base).is_none()||self.current_map(p,base).is_none()||self.local_pawn_invalid(p,base));
         if (!read.is_some_and(valid_pointer)||secondary_unavailable)
             && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
             self.recovery_at=Some(Instant::now());
@@ -548,9 +569,9 @@ impl CS2Reader {
             if let Some(recovered)=crate::resolver::recover_player_globals(p,base){
                 self.schema.recover_player_offsets(recovered.entity_list_offset,recovered.local_controller_offset,&recovered.additional_offsets);
                 diag.set("runtime_recovered_globals",json!(recovered.additional_offsets.iter().map(|(name,_)|*name).collect::<Vec<_>>()));
-                self.layout=Layout::new(0);self.layout_at=None;self.chunk_cache.clear();
+                self.layout=Layout::new(0);self.layout_source=0;self.layout_at=None;self.chunk_cache.clear();
                 self.runtime_offsets=true;
-                read=try_u64(p,base+recovered.entity_list_offset);
+                list_off=recovered.entity_list_offset;read=try_u64(p,base+list_off);
             }
         }
         diag.set("runtime_offsets_verified",json!(self.runtime_offsets && read.is_some_and(valid_pointer)));
@@ -957,4 +978,65 @@ mod bomb_read_tests {
         assert!(effect_remaining(Some(0),Some(105.),20.).is_none());
         assert!(effect_remaining(Some(6400),None,20.).is_none());
     }
+}
+
+#[cfg(test)] mod reader_recovery_tests {
+ use super::*;use crate::process::FakeMemory;
+ const BASE:u64=0x100000;const LIST:u64=0x200000;const BLOCK:u64=0x300000;const CTL:u64=0x400000;const PAWN:u64=0x500000;const NODE:u64=0x600000;
+ fn reader()->CS2Reader {
+  let off=json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16,"dwGlobalVars":24,"dwLocalPlayerPawn":32}});
+  let cls=json!({"client.dll":{"classes":{
+   "CCSPlayerController":{"fields":{"m_hPlayerPawn":32,"m_bPawnIsAlive":36}},
+   "CBasePlayerController":{"fields":{"m_nTickBase":48}},
+   "C_BaseEntity":{"fields":{"m_iTeamNum":16,"m_iHealth":20,"m_pGameSceneNode":40}},
+   "CGameSceneNode":{"fields":{"m_vecAbsOrigin":16}}
+  }}});
+  CS2Reader::new(Schema::from_json(&off,&cls,json!({"build_number":1})).unwrap())
+ }
+ fn put_actor(p:&mut FakeMemory,list:u64,block:u64,ctl:u64,pawn:u64,node:u64,slot:u64,stride:u64){
+  p.put(list+16,&block.to_le_bytes());p.put(block,&vec![0;512*120]);
+  p.put(block+slot*stride,&ctl.to_le_bytes());p.put(block+100*stride,&pawn.to_le_bytes());
+  p.put(ctl+16,&[2]);p.put(ctl+32,&100u32.to_le_bytes());p.put(ctl+36,&[1]);p.put(ctl+48,&6400u32.to_le_bytes());
+  p.put(pawn+16,&[2]);p.put(pawn+20,&100u32.to_le_bytes());p.put(pawn+40,&node.to_le_bytes());
+  p.put(node+16,&[100f32,200.,64.].into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>());
+ }
+ fn initial()->FakeMemory{
+  let mut p=FakeMemory::new();p.put(BASE+8,&LIST.to_le_bytes());p.put(BASE+16,&CTL.to_le_bytes());p.put(BASE+24,&0u64.to_le_bytes());p.put(BASE+32,&PAWN.to_le_bytes());
+  put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,120);p
+ }
+ #[test]fn missing_map_is_recovered_even_when_controller_clock_works(){
+  let mut r=reader();let mut p=initial();let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.players.len(),1);assert_eq!(s.diagnostics["game_time_available"],true);assert_eq!(s.diagnostics["map_memory_available"],false);
+  assert_eq!(s.diagnostics["runtime_recovery_attempted"],true,"Missing map global never triggers the recovery while fallback clock works");
+ }
+ #[test]fn entity_root_change_does_not_read_old_list_for_three_seconds(){
+  let mut r=reader();let mut p=initial();assert_eq!(r.snapshot(&mut p,BASE,0,1,false,false).unwrap().players.len(),1);
+  let (list,block,ctl,pawn,node)=(0x210000u64,0x310000u64,0x410000u64,0x510000u64,0x610000u64);
+  put_actor(&mut p,list,block,ctl,pawn,node,5,120);p.put(BASE+8,&list.to_le_bytes());p.put(BASE+16,&ctl.to_le_bytes());p.put(BASE+32,&pawn.to_le_bytes());
+  let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.players.len(),1,"old and new controller sets are mixed during root-change throttle");assert_eq!(s.players[0].id,5);
+ }
+ #[test]fn confirmed_layout_revalidates_in_a_new_process(){
+  let mut r=reader();let mut p=initial();assert_eq!(r.snapshot(&mut p,BASE,0,1,false,false).unwrap().diagnostics["layout_stride"],120);
+  put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,112);
+  let s=r.snapshot(&mut p,BASE,0,2,false,false).unwrap();
+  assert_eq!(s.diagnostics["layout_stride"],112,"previous pid's confirmed stride persists forever at a reused root address");
+ }
+ #[test]fn confirmed_layout_revalidates_after_a_same_process_mismatch(){
+  let mut r=reader();let mut p=initial();r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,112);
+  let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.diagnostics["layout_stride"],112);assert_eq!(s.players[0].id,3);
+ }
+ #[test]fn recovered_addresses_are_not_reused_in_the_next_process(){
+  let mut r=reader();let mut p=initial();r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  r.schema.recover_player_offsets(64,72,&[("dwGlobalVars",80)]);r.runtime_offsets=true;
+  let s=r.snapshot(&mut p,BASE,0,2,false,false).unwrap();
+  assert_eq!(s.players.len(),1);assert_eq!(r.schema.offset("dwEntityList"),Some(8));
+  assert_eq!(s.diagnostics["runtime_offsets_verified"],false);
+ }
+ #[test]fn skinned_knives_are_still_knives(){
+  for id in [42,59,500,503,505,507,512,515,520,523,525,526]{assert_eq!(weapon_name(id),"Knife");}
+  assert_eq!(weapon_name(501),"Item #501");assert_eq!(weapon_name(7),"AK-47");
+ }
 }

@@ -1,5 +1,5 @@
 use cas_external_radar::{assets,game::CS2Reader,gsi,model::{Snapshot,demo_snapshot},process::WinProcess,server::HttpServer,schema::Schema,state::SharedState,tracker::BombTracker,grenade::GrenadeTracker,noise::NoiseTracker,overlay::OverlayController};
-use serde_json::{json,Value};
+use serde_json::json;
 use std::{collections::HashMap,env,fs,path::{Path,PathBuf},sync::{Arc,Mutex},thread,time::{Duration,Instant}};
 use rand::{rngs::OsRng,RngCore};
 
@@ -39,6 +39,7 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
     let mut last_frame=Instant::now();let mut rate=0.;
     let mut cache_details:HashMap<u32,cas_external_radar::model::Player>=HashMap::new();
     let mut cache_grenades:Vec<cas_external_radar::model::GrenadeView>=Vec::new();
+    let mut reader_pid=0;
     let mut last_log=Instant::now()-Duration::from_secs(12);
     let mut last_msg=String::new();
     loop {
@@ -52,10 +53,18 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 if last_scan.elapsed()>Duration::from_secs(5)||proc.pid==0{
                     last_scan=Instant::now();
                     if !proc.connect()?{
+                        reader.reset();reader_pid=0;
                         tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();
                         if let Ok(mut s)=state.lock(){s.clear_automatic_map();}
                         return Ok(Snapshot::status("waiting","cs2.exe not found"));
                     }
+                }
+                if reader_pid!=proc.pid{
+                    reader_pid=proc.pid;cache_details.clear();cache_grenades.clear();
+                    tracker.reset();grenade_tracker.reset();noise_tracker.reset();
+                    last_detail=Instant::now()-Duration::from_secs(1);
+                    last_grenade_scan=Instant::now()-Duration::from_secs(1);
+                    last_map=Instant::now()-Duration::from_secs(1);
                 }
                 let base=proc.module("client.dll");let engine=proc.module("engine2.dll");
                 if base==0{return Err("client.dll not loaded".into());}
@@ -124,11 +133,9 @@ fn start()->Result<(),String>{
     let args=parse_args()?;
     let root=exe_root();let cache=root.join("cache");fs::create_dir_all(&cache).map_err(|e|e.to_string())?;
     let maps=assets::load_maps(&cache,args.offline,args.refresh);
-    let schema=if args.demo {None}else {
-        let mut url=|name:&str|assets::cached_json(&format!("{}{}.json",assets::OFFSETS_SRC,name),&cache.join(format!("{}.json",name)),args.offline,true);
-        let offsets=url("offsets");let client=url("client_dll");let info=url("info").unwrap_or(json!({}));
-        match (offsets,client){(Some(o),Some(c))=>match Schema::from_json(&o,&c,info){Ok(s)=>Some(s),Err(e)=>{eprintln!("[schema] {e}");None}},_=>None}
-    };
+    let schema=if args.demo {None}else {match assets::load_schema(&cache,args.offline){
+        Ok(schema)=>Some(schema),Err(error)=>{eprintln!("[schema] {error}");None}
+    }};
     let token=random_token(24);let secret_path=cache.join("gsi_token.txt");
     let gsi_token=fs::read_to_string(&secret_path).ok().map(|s|s.trim().to_string()).filter(|s|s.len()>25)
         .unwrap_or_else(||{let n=random_token(32);let _=fs::write(&secret_path,&n);n});

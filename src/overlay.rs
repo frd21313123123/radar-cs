@@ -66,11 +66,13 @@ fn countdown_remaining(remaining:f32,snapshot_time:f64,now:f64)->Option<f32>{
 /// report player readiness from the reader snapshot, never from map metadata.
 #[cfg(any(windows,test))]
 fn reader_notice(status:&str,player_count:usize,message:Option<&str>,columns:usize)->Option<Vec<String>> {
-    if player_count>0&&!matches!(status,"error"|"waiting"|"no_players"|"starting"){return None;}
+    if player_count>0&&!matches!(status,"error"|"waiting"|"no_players"|"starting"|"stale"){return None;}
     let message=message.unwrap_or("");
     // Reader failures are translated to bounded, known-safe UI text. Do not
     // echo arbitrary paths, memory addresses or credentials into the overlay.
-    let reason=if message.contains("OpenProcess denied") {
+    let reason=if status=="stale"{
+        "Данные CS2 не обновляются. Проверьте радар и подключение к игре."
+    }else if message.contains("OpenProcess denied") {
         "Нет доступа к процессу CS2. Проверьте права запуска."
     }else if message.contains("cs2.exe not found") {
         "CS2 не запущена. Запустите игру и откройте матч."
@@ -572,7 +574,7 @@ mod win {
         }
         // Draw world C4 regardless of team filters; keep it in map space,
         // so it follows the same rotation and pan as players and plant sites.
-        if let Some(bomb)=snap.bomb_world.as_ref(){
+        if let Some(bomb)=snap.bomb_world.as_ref().filter(|bomb|assets::position_in_map_layer(mapdata,&layer,bomb.position)){
             if let Some((x,y))=screen_point(bomb.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
                 let px=x.round() as i32;let py=y.round() as i32;
 
@@ -583,6 +585,7 @@ mod win {
         // Utility overlays are drawn in map coordinates: camera rotation is
         // already active here, so paths and radii follow the map correctly.
         for nade in &snap.grenades{
+            if !assets::position_in_map_layer(mapdata,&layer,nade.position){continue;}
             let zone_enabled=(nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire);
             if !zone_enabled&&!cfg.show_paths{continue;}
             if cfg.show_paths && nade.trajectory.len()>1{
@@ -616,6 +619,7 @@ mod win {
                     }
                     if fire{
                         for cell in &nade.fire_cells {
+                            if !assets::position_in_map_layer(mapdata,&layer,*cell){continue;}
                             if let Some((fx,fy))=screen_point(*cell,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){
                                 let cr=(38.0/(scale*1024.0)*side).max(2.0);
                                 unsafe{let b=brush(g,0x5fff6a36);
@@ -635,6 +639,7 @@ mod win {
         if camera_angle.is_some(){unsafe{GdipResetWorldTransform(g);}}
         let age=(crate::model::now_secs()-snap.time).max(0.0) as f32;
         for nade in &snap.grenades{
+            if !assets::position_in_map_layer(mapdata,&layer,nade.position){continue;}
             let enabled=(nade.kind=="smoke"&&cfg.show_smokes)||(nade.kind=="molotov"&&cfg.show_fire);
             if nade.state!="active"||!enabled{continue;}
             if let Some(remaining)=nade.remaining_secs.filter(|n|n.is_finite()).map(|n|(n-age).max(0.)){
@@ -733,7 +738,7 @@ mod win {
                 text.push_str(&format!(" | OBS: {short}"));
             }
         }
-        if no_player_data.is_some(){text="CAS MINI  •  НЕТ ДАННЫХ ИГРОКОВ".into();}
+        if no_player_data.is_some(){text=if snap.status=="stale"{"CAS MINI  •  НЕТ ОБНОВЛЕНИЙ"}else{"CAS MINI  •  НЕТ ДАННЫХ ИГРОКОВ"}.into();}
         // Leave room for the independent close control at every window size.
         let max_chars=((width-62)/7).max(4) as usize;
         text=text.chars().take(max_chars).collect();

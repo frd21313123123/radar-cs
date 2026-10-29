@@ -2,7 +2,7 @@
 name = "cas-external-radar"
 version = "1.9.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 description = "Standalone read-only external CS2 radar with browser dashboard and native Win32 mini radar"
 license = "MIT"
 
@@ -11,6 +11,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.12", default-features = true }
 rand = "0.8"
+png = "0.17.16"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

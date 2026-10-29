@@ -37,7 +37,9 @@ try {
     function Assert($Condition,[string]$Message) { if (!$Condition) { throw $Message } }
     $state = Request '/api/state'
     Assert ($state.status -eq 'demo' -and $state.players.Count -eq 7) 'Demo players missing'
-    Assert (($state.players | Where-Object is_flashed).Count -gt 0) 'Demo flash state missing'
+    # The demo intentionally alternates flashed/clear phases. Check the
+    # transported field without requiring a particular startup instant.
+    Assert (@($state.players | Where-Object { $_.is_flashed -is [bool] }).Count -eq $state.players.Count) 'Demo flash state missing'
     Assert (($state.grenades | Where-Object { $null -ne $_.remaining_secs }).Count -gt 0) 'Utility timers missing'
     $maps = Request '/api/maps'
     Assert ($maps.maps.de_nuke.radar_info.scale -eq 7) 'Nuke metadata missing'

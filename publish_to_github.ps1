@@ -6,6 +6,9 @@ param(
     [switch]$Public
 )
 $ErrorActionPreference = 'Stop'
+if ($Owner -notmatch '^[A-Za-z0-9][A-Za-z0-9-]*$' -or $Repository -notmatch '^[A-Za-z0-9_.-]+$' -or $Repository -in @('.', '..')) {
+    throw 'Invalid GitHub owner or repository name'
+}
 Set-Location $PSScriptRoot
 foreach ($tool in @('git', 'gh')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
@@ -44,17 +47,26 @@ try {
 if (-not $exists) {
     $visibility = if ($Public) { '--public' } else { '--private' }
     Write-Host "Creating $fullName ($visibility)" -ForegroundColor Cyan
-    & gh repo create $fullName $visibility --source . --remote origin --push `
+    & gh repo create $fullName $visibility `
         --description 'CAS External Radar in Rust: native Win32 mini-map and auto Windows releases'
     if ($LASTEXITCODE -ne 0) { throw 'gh repo create failed' }
 } else {
     Write-Host "Repository exists: $fullName" -ForegroundColor Yellow
-    & git remote get-url origin *> $null
-    if ($LASTEXITCODE -ne 0) { & git remote add origin "https://github.com/$fullName.git" }
-    & git branch -M main
-    & git push -u origin main
-    if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
 }
+# Always bind the actual push destination to the requested repository, including
+# an existing checkout and the create-new-repository path. An explicit pushurl
+# would override the ordinary origin URL, so remove every such override too.
+$remoteUrl = "https://github.com/$fullName.git"
+& git remote get-url origin *> $null
+if ($LASTEXITCODE -eq 0) { & git remote set-url origin $remoteUrl }
+else { & git remote add origin $remoteUrl }
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure the requested GitHub remote' }
+& git config --unset-all remote.origin.pushurl
+if ($LASTEXITCODE -notin @(0,5)) { throw 'Could not clear an overriding push destination' }
+& git branch -M main
+if ($LASTEXITCODE -ne 0) { throw 'Could not select main branch' }
+& git push -u origin main
+if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
 Write-Host ''
 Write-Host "Repository: https://github.com/$fullName" -ForegroundColor Green
 Write-Host "Automatic builds: https://github.com/$fullName/actions" -ForegroundColor Green

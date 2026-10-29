@@ -45,6 +45,8 @@ pub struct BombWorld {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GrenadeView {
     pub id:u32,
+    /// Memory identity is used only by the tracker, never sent to clients.
+    #[serde(skip)] pub entity_instance:Option<(u64,u32)>,
     pub kind:String,
     pub state:String,
     pub position:[f32;3],
@@ -141,7 +143,38 @@ pub fn now_secs() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64()
 }
 
+pub const SNAPSHOT_STALE_SECS:f64=2.;
+#[cfg(test)]mod freshness_tests{
+    use super::*;
+    #[test]fn fresh_snapshot_survives_but_an_expired_one_loses_entities(){
+        let mut s=demo_snapshot(0.);s.time=100.;
+        s.expire_stale_data(101.9);assert_eq!(s.players.len(),7);
+        s.expire_stale_data(102.);assert_eq!(s.status,"stale");assert!(s.players.is_empty());
+        assert!(s.grenades.is_empty());assert!(s.bomb_timer.is_none());assert!(s.observer_view.is_none());
+    }
+    #[test]fn error_snapshots_keep_their_original_diagnostics(){
+        let mut s=Snapshot::status("error","reader failed");s.time=100.;
+        s.expire_stale_data(110.);assert_eq!(s.status,"error");assert_eq!(s.message.as_deref(),Some("reader failed"));
+    }
+    #[test]fn demo_flash_can_be_tested_without_a_wall_clock_race(){
+        assert!(demo_snapshot(0.).players.iter().any(|p|p.is_flashed==Some(true)));
+        assert!(demo_snapshot(4.).players.iter().all(|p|p.is_flashed==Some(false)));
+        assert!(demo_snapshot(8.).players.iter().any(|p|p.is_flashed==Some(true)));
+    }
+}
 impl Snapshot {
+    /// Stop exposing moving entities when the producer no longer advances.
+    /// The selected map and diagnostics remain available for troubleshooting.
+    pub fn expire_stale_data(&mut self,now:f64){
+        if !matches!(self.status.as_str(),"live"|"partial"|"demo"|"no_players"){return;}
+        if now.is_finite()&&self.time.is_finite()&&(now-self.time).abs()<SNAPSHOT_STALE_SECS{return;}
+        self.status="stale".into();self.source_hz=0.;
+        self.message=Some("Данные CS2 не обновляются. Проверьте радар и подключение к игре.".into());
+        self.players.clear();self.observer_view=None;self.grenades.clear();
+        self.bomb_world=None;self.bomb_timer=None;self.bomb_carrier_id=None;
+        self.bomb_carrier_source=None;self.c4_global_owner_id=None;self.c4_unowned=false;
+        self.local_motion=None;self.noise=None;
+    }
     /// The living local player always takes precedence; when dead, optionally
     /// follow the confirmed observer target (not the corpse position).
     pub fn radar_focus(&self, follow_spectator: bool) -> Option<RadarFocus> {
@@ -233,9 +266,9 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
     Snapshot { status:"demo".into(),local_team:3,players,
         grenades_read:true,
         grenades:vec![
-          GrenadeView{id:1001,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![],remaining_secs:Some(20.-t.rem_euclid(20.) as f32),timer_estimated:false},
-          GrenadeView{id:1002,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]],remaining_secs:Some(7.-t.rem_euclid(7.) as f32),timer_estimated:false},
-          GrenadeView{id:1003,kind:"smoke".into(),state:"flying".into(),position:[-1430.,-430.,-110.],radius_units:160.,
+          GrenadeView{id:1001,entity_instance:None,kind:"smoke".into(),state:"active".into(),position:[-1000.,-300.,-150.],radius_units:160.,trajectory:vec![],fire_cells:vec![],remaining_secs:Some(20.-t.rem_euclid(20.) as f32),timer_estimated:false},
+          GrenadeView{id:1002,entity_instance:None,kind:"molotov".into(),state:"active".into(),position:[-1800.,120.,-150.],radius_units:135.,trajectory:vec![],fire_cells:vec![[-1810.,100.,-150.],[-1760.,135.,-150.]],remaining_secs:Some(7.-t.rem_euclid(7.) as f32),timer_estimated:false},
+          GrenadeView{id:1003,entity_instance:None,kind:"smoke".into(),state:"flying".into(),position:[-1430.,-430.,-110.],radius_units:160.,
              trajectory:vec![[-1680.,-650.,-140.],[-1600.,-560.,-80.],[-1510.,-490.,-95.],[-1430.,-430.,-110.]],fire_cells:vec![],remaining_secs:None,timer_estimated:false}
         ],
         local_motion:Some(LocalMotion{speed:Some(230.),on_ground:Some(true),ducking:Some(false),shots_fired:Some(0),weapon:Some("AK-47".into())}),
