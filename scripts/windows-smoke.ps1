@@ -54,6 +54,9 @@ using System;
 using System.Runtime.InteropServices;
 public static class RadarSmokeWindow {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls,string title);
+ // PowerShell may coerce $null string arguments to empty strings. Pass
+ // the wildcard title as a genuine CLR null inside C# instead.
+ public static IntPtr RadarWindow() { return FindWindow("CAS_RUST_NATIVE_RADAR_WINDOW", null); }
  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
  [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hwnd,int index);
@@ -63,7 +66,7 @@ public static class RadarSmokeWindow {
     $null = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=100}
     $hwnd = [IntPtr]::Zero
     for ($i=0; $i -lt 100; $i++) {
-        $hwnd = [RadarSmokeWindow]::FindWindow('CAS_RUST_NATIVE_RADAR_WINDOW',$null)
+        $hwnd = [RadarSmokeWindow]::RadarWindow()
         if ($hwnd -ne [IntPtr]::Zero -and [RadarSmokeWindow]::IsWindowVisible($hwnd)) { break }
         Start-Sleep -Milliseconds 100
     }
