@@ -76,7 +76,9 @@ def check_browser(url, executable, screenshots=None):
                     route.continue_()
 
             a.route("**/api/state?*", hold_one)
-            a.wait_for_timeout(150)
+            deadline = time.monotonic() + 5
+            while not held and time.monotonic() < deadline:
+                a.wait_for_timeout(50)
             assert held, "No state request was captured"
             a.locator("#mapSelect").select_option("de_nuke")
             a.wait_for_function("() => map==='de_nuke'&&!mapSelectionPending")
@@ -101,7 +103,16 @@ def check_browser(url, executable, screenshots=None):
                 {"id": 920, "kind": "molotov", "state": "active", "position": [-1100, 100, 0],
                  "radius_units": 133, "trajectory": [], "fire_cells": [], "remaining_secs": 7, "timer_estimated": False},
             ]
-            a.route("**/api/state?*", lambda route: route.fulfill(json=frozen))
+            # Floor assertions take multiple browser round trips. Keep this
+            # fixture fresh until we explicitly test a frozen snapshot below.
+            keep_fresh = True
+
+            def floor_state(route):
+                if keep_fresh:
+                    frozen["time"] += .01
+                route.fulfill(json=frozen)
+
+            a.route("**/api/state?*", floor_state)
             a.wait_for_function("() => snapshot.grenades.some(g=>g.id===919)")
             a.evaluate("""() => {
                 window.auditZones={919:0,920:0};
@@ -126,6 +137,7 @@ def check_browser(url, executable, screenshots=None):
             assert not a.locator("#bombTimerPanel").evaluate("element=>element.hidden")
             print("PASS: utility zones and their timers use the selected Nuke floor")
 
+            keep_fresh = False
             a.wait_for_function("() => snapshotStale()&&shown().length===0", timeout=5000)
             a.wait_for_function("() => $('statusText').textContent.startsWith('STALE')")
             assert a.locator(".player").count() == 0

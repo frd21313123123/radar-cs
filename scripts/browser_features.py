@@ -71,10 +71,23 @@ def check_settings(page, screenshots=None):
     def saved_ui():
         page.wait_for_function("() => $('overlayStatus').textContent.startsWith('Сохранено')")
 
+    def set_transparency(value):
+        page.locator("#nativeOpacity").evaluate("""(element,value)=>{
+            element.value=String(value);element.dispatchEvent(new Event('input',{bubbles:true}));
+            element.dispatchEvent(new Event('change',{bubbles:true}));
+        }""", value)
+        saved_ui()
+
     page.route("**/api/overlay?*", overlay)
     try:
         page.locator("#miniBtn").click()
         page.wait_for_function("() => nativeAvailable&&!$('nativeHP').disabled")
+        assert page.locator("#nativeOpacity").is_visible(), "Transparency must be visible without selecting a subgroup"
+        assert page.locator("#nativeOpacityLabel").inner_text() == "0%"
+        for transparency in (90, 0, 43):
+            set_transparency(transparency)
+            assert saved["opacity"] == 100 - transparency, "Transparency was saved as opacity without inversion"
+            assert page.locator("#nativeOpacityLabel").inner_text() == f"{transparency}%"
         page.locator("#nativeHP").uncheck()
         page.locator("#nativeWeaponName").uncheck()
         saved_ui()
@@ -88,10 +101,12 @@ def check_settings(page, screenshots=None):
         page.locator("#nativeHP").uncheck()
         saved_ui()
         page.locator("#nativeSectionSelect").select_option("objects")
+        assert page.locator("#nativeOpacity").is_visible()
         page.locator("#nativeUtilityTimers").uncheck()
         saved_ui()
         assert not saved["show_utility_timers"]
         page.locator("#nativeSectionSelect").select_option("window")
+        assert page.locator("#nativeOpacity").is_visible()
         page.locator("#nativeVisible").check()
         page.locator("#nativeZoom").evaluate("element=>{element.value='1.5';element.dispatchEvent(new Event('input',{bubbles:true}));element.dispatchEvent(new Event('change',{bubbles:true}));}")
         saved_ui()
@@ -114,7 +129,17 @@ def check_settings(page, screenshots=None):
         saved_ui()
         assert page.locator("#showNoise").is_checked()
         assert saved["noise_animation"] and not saved["show_hp"], "Sound reset changed player settings"
+        assert saved["opacity"] == 57, "Sound reset changed window transparency"
         page.locator("#settingsTabMini").click()
+        assert page.locator("#nativeOpacity").input_value() == "43", "Transparency was not restored after reload"
+        assert page.locator("#nativeOpacityLabel").inner_text() == "43%"
+        page.locator("#nativeSectionSelect").select_option("window")
+        page.locator("#resetSettings").click()
+        saved_ui()
+        assert saved["opacity"] == defaults["opacity"] and saved["zoom"] == defaults["zoom"]
+        assert not saved["show_hp"], "Window reset changed player settings"
+        assert page.locator("#nativeOpacityLabel").inner_text() == "0%"
+        set_transparency(43)
         page.locator("#nativeSectionSelect").select_option("players")
         assert not page.locator("#nativeHP").is_checked()
         assert page.locator("#nativeNames").is_checked()
@@ -133,6 +158,6 @@ def check_settings(page, screenshots=None):
         page.keyboard.press("Escape")
         assert page.locator("#settingsBackdrop").is_hidden()
         page.set_viewport_size({"width": 1512, "height": 982})
-        print("PASS: detailed mini-map controls, presets, save/reload, scoped reset, mobile layout and keyboard navigation")
+        print("PASS: detailed mini-map controls, visible transparency, presets, save/reload, scoped reset, mobile layout and keyboard navigation")
     finally:
         page.unroute("**/api/overlay?*", overlay)

@@ -61,11 +61,12 @@ public static class RadarSmokeWindow {
  public static IntPtr RadarWindow() { return FindWindow("CAS_RUST_NATIVE_RADAR_WINDOW", null); }
  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll")] public static extern bool GetLayeredWindowAttributes(IntPtr hwnd,out uint key,out byte alpha,out uint flags);
  [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hwnd,int index);
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint msg,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
 }
 '@
-    $configured = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=100; show_hp=$false; show_hp_bar=$true;
+    $configured = Request '/api/overlay' 'POST' @{visible=$true; zoom=0.35; opacity=55; show_hp=$false; show_hp_bar=$true;
         show_weapon_icon=$true; show_weapon_name=$false; show_names=$true; show_armor=$true; marker_scale=1.2; text_size=14;
         noise_animation=$true; noise_color='#f2c477'; noise_opacity=65; noise_show_range=$true}
     Assert (!$configured.settings.show_hp -and $configured.settings.show_hp_bar -and !$configured.settings.show_weapon_name -and $configured.settings.show_armor) 'Detailed marker settings were not applied'
@@ -85,6 +86,17 @@ public static class RadarSmokeWindow {
     }
     Assert ($hwnd -ne [IntPtr]::Zero -and [RadarSmokeWindow]::IsWindowVisible($hwnd)) 'Native window not visible'
     Assert ((Request '/api/overlay').window_ready) 'Native window bridge not ready'
+    # Read Windows' actual layered-window alpha, not just the API's echo.
+    foreach ($opacity in @(55,10,100,55)) {
+        $null = Request '/api/overlay' 'POST' @{opacity=$opacity}
+        $expectedAlpha = [byte][Math]::Floor($opacity * 255 / 100)
+        $alpha = [byte]0; $key = [uint32]0; $flags = [uint32]0; $applied = $false
+        for ($i=0; $i -lt 50; $i++) {
+            if ([RadarSmokeWindow]::GetLayeredWindowAttributes($hwnd,[ref]$key,[ref]$alpha,[ref]$flags) -and $alpha -eq $expectedAlpha -and ($flags -band 2) -ne 0) { $applied=$true; break }
+            Start-Sleep -Milliseconds 50
+        }
+        Assert $applied 'Native window transparency did not update'
+    }
     $rendered = $false
     for ($i=0; $i -lt 100; $i++) {
         if ((Request '/api/overlay').map_ready) { $rendered=$true; break }
@@ -103,12 +115,13 @@ public static class RadarSmokeWindow {
     $saved = Get-Content "$work/cache/overlay_settings.json" -Raw | ConvertFrom-Json
     Assert (!$saved.visible) 'Native close did not persist visibility'
     Assert (!$saved.show_hp -and $saved.show_names -and $saved.show_armor -and !$saved.show_weapon_name -and $saved.text_size -eq 14) 'Detailed settings were not persisted'
+    Assert ($saved.opacity -eq 55) 'Window transparency was not persisted'
     $null = Request '/api/overlay' 'POST' @{visible=$true}
     for ($i=0; $i -lt 50 -and ![RadarSmokeWindow]::IsWindowVisible($hwnd); $i++) { Start-Sleep -Milliseconds 100 }
     Assert ([RadarSmokeWindow]::IsWindowVisible($hwnd)) 'Native reopen failed'
     $null = Request '/api/map-selection' 'POST' @{map=$null}
     Assert ((Request '/api/state').game_map -eq 'de_mirage') 'AUTO did not resume the game map'
-    Write-Host 'PASS Windows runtime: HTTP, seven demo players, flash, utility clocks, Nuke selection, authentication, equipment icons, visible borderless native window, decoded PNG background, responsive loop, close persistence and reopening.'
+    Write-Host 'PASS Windows runtime: HTTP, seven demo players, flash, utility clocks, Nuke selection, authentication, equipment icons, visible borderless native window, actual window transparency and persistence, decoded PNG background, responsive loop, close persistence and reopening.'
 } catch {
     $failure = $_
     try { Write-Host ('Overlay failure status: ' + ((Request '/api/overlay') | ConvertTo-Json -Compress -Depth 4)) } catch { Write-Host 'Overlay diagnostic unavailable' }

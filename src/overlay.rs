@@ -183,7 +183,7 @@ impl OverlaySettings {
                     "zoom"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.35..=4.).contains(&v)),
                     "marker_scale"=>value.as_f64().map(|v|v as f32).is_some_and(|v|(0.65..=1.75).contains(&v)),
                     "text_size"=>value.as_u64().is_some_and(|v|(9..=18).contains(&v)),
-                    "opacity"=>value.as_u64().is_some_and(|v|(50..=100).contains(&v)),
+                    "opacity"=>value.as_u64().is_some_and(|v|(10..=100).contains(&v)),
                     "noise_opacity"=>value.as_u64().is_some_and(|v|(10..=100).contains(&v)),
                     _=>false,
                 };
@@ -1010,9 +1010,9 @@ mod win {
         assert!(settings.marker_padding().1<bottom);
     }
     #[test]fn minimum_float_settings_roundtrip_without_precision_rejection(){
-        let mut settings=OverlaySettings::default();settings.update(&json!({"zoom":0.35,"marker_scale":0.65})).unwrap();
+        let mut settings=OverlaySettings::default();settings.update(&json!({"zoom":0.35,"marker_scale":0.65,"opacity":10})).unwrap();
         let value=serde_json::to_value(settings).unwrap();let mut restored=OverlaySettings::default();
-        restored.update(&value).unwrap();assert_eq!(restored.zoom,0.35);assert_eq!(restored.marker_scale,0.65);
+        restored.update(&value).unwrap();assert_eq!(restored.zoom,0.35);assert_eq!(restored.marker_scale,0.65);assert_eq!(restored.opacity,10);
     }
     #[test]fn detailed_player_options_survive_save_reload_and_legacy_configuration(){
         let mut settings=OverlaySettings::default();
@@ -1028,7 +1028,8 @@ mod win {
     #[test]fn invalid_settings_are_rejected_atomically(){
         let mut settings=OverlaySettings::default();let original=serde_json::to_value(&settings).unwrap();
         for patch in [json!({"show_hp":false,"text_size":40}),json!({"show_hp":"yes"}),json!({"marker_scale":0}),
-            json!({"noise_opacity":101}),json!({"noise_color":"red"}),json!({"show_weapon_icon":null}),json!({"unknown":true})]{
+            json!({"noise_opacity":101}),json!({"noise_color":"red"}),json!({"show_weapon_icon":null}),json!({"unknown":true}),
+            json!({"opacity":0}),json!({"opacity":9}),json!({"opacity":101}),json!({"opacity":50.5})]{
             assert!(settings.update(&patch).is_err());assert_eq!(serde_json::to_value(&settings).unwrap(),original);
         }
     }
