@@ -7,8 +7,29 @@ pub const MAP_SRC:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/
 pub const RADARS:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/images/radars/";
 const UA:&str="CAS-External-Radar-Rust/0.9";
 
+fn download_agent()->Result<ureq::Agent,String>{
+    use ureq::rustls::{self,pki_types::{CertificateDer,pem::PemObject}};
+    // Respect the user's configured route and trust store. ureq does not
+    // consult proxy environment variables by default. TLS stays verified.
+    let mut builder=ureq::AgentBuilder::new().try_proxy_from_env(true);
+    if let Some(path)=std::env::var_os("SSL_CERT_FILE").or_else(||std::env::var_os("REQUESTS_CA_BUNDLE")){
+        let certs=CertificateDer::pem_file_iter(std::path::PathBuf::from(path))
+            .map_err(|_|"Configured CA bundle cannot be read".to_string())?;
+        let mut roots=rustls::RootCertStore::empty();
+        for cert in certs{
+            let cert=cert.map_err(|_|"Configured CA bundle has invalid PEM".to_string())?;
+            roots.add(cert).map_err(|_|"Configured CA bundle has an invalid certificate".to_string())?;
+        }
+        if roots.is_empty(){return Err("Configured CA bundle has no certificates".into());}
+        let tls=rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        builder=builder.tls_config(std::sync::Arc::new(tls));
+    }
+    Ok(builder.build())
+}
 pub fn download(url:&str,limit:usize)->Result<Vec<u8>,String>{
-    let response=ureq::get(url).set("User-Agent",UA).timeout(Duration::from_secs(8)).call().map_err(|e|e.to_string())?;
+    static AGENT:std::sync::OnceLock<Result<ureq::Agent,String>>=std::sync::OnceLock::new();
+    let agent=AGENT.get_or_init(download_agent).as_ref().map_err(Clone::clone)?;
+    let response=agent.get(url).set("User-Agent",UA).timeout(Duration::from_secs(8)).call().map_err(|e|e.to_string())?;
     let mut buffer=Vec::new();
     response.into_reader().take(limit as u64+1).read_to_end(&mut buffer).map_err(|e|e.to_string())?;
     if buffer.len()>limit {Err(format!("remote asset too large: {url}"))}else{Ok(buffer)}
@@ -76,10 +97,83 @@ pub fn fallback_maps()->Value{
     }
     with_bombsites(json!({"maps":maps}))
 }
+const MAP_REFRESH_MARKER:&str="map-images.refresh";
+fn request_map_image_refresh(cache:&Path,offline:bool,force:bool){
+    if force&&!offline {
+        // Mark existing PNGs stale without downloading every map at startup.
+        // Offline mode retains working images even when a refresh was requested.
+        if fs::create_dir_all(cache).and_then(|_|fs::write(cache.join(MAP_REFRESH_MARKER),b"")).is_err(){
+            eprintln!("[cache] Cannot record map image refresh request");
+        }
+    }
+}
+fn map_cache_needs_refresh(path:&Path,cache:&Path,now:SystemTime)->bool{
+    let modified=match fs::metadata(path).and_then(|m|m.modified()){Ok(at)=>at,Err(_)=>return true};
+    let expired=now.duration_since(modified).is_ok_and(|age|age>=Duration::from_secs(86400));
+    let requested=fs::metadata(cache.join(MAP_REFRESH_MARKER)).and_then(|m|m.modified()).ok()
+        .is_some_and(|marker|modified<marker);
+    expired||requested
+}
+
+/// Refresh JSON metadata now; PNGs older than 24h or an online --refresh marker
+/// refresh only when requested. A failed fetch retains an existing valid image.
 pub fn load_maps(cache:&Path,offline:bool,force:bool)->Value{
+    request_map_image_refresh(cache,offline,force);
     let got=cached_json(MAP_SRC,&cache.join("maps.json"),offline,force);
     if got.as_ref().and_then(|v|v["maps"].as_object()).is_some(){with_bombsites(got.unwrap())}else{fallback_maps()}
 }
+/// Pick the same floor image and world projection metadata at a height boundary.
+/// Unknown height keeps the overview default; never invent another floor.
+pub fn map_layer_for_height(radar_info:&Value,height:Option<f32>)->String{
+    let Some(height)=height.filter(|v|v.is_finite()) else{return "default".into();};
+    let Some(layers)=radar_info.get("verticalsections").and_then(Value::as_object) else{return "default".into();};
+    for (name,layer) in layers {
+        let (Some(min),Some(max))=(layer["AltitudeMin"].as_f64(),layer["AltitudeMax"].as_f64()) else{continue;};
+        if min.is_finite()&&max.is_finite()&&min<max&&(height as f64)>=min&&(height as f64)<max
+            && name.len()<=20 && name.bytes().all(|b|b.is_ascii_lowercase()||b==b'_') {
+            return name.clone();
+        }
+    }
+    "default".into()
+}
+
+// A signature alone accepts a truncated cache file that Windows cannot decode.
+// Check bounded chunk framing and the image header before persisting/reusing PNGs.
+fn valid_map_png(bytes:&[u8])->bool{
+    if bytes.len()>8_000_000 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n"){return false;}
+    let mut at=8usize;let mut header=false;let mut pixels=false;
+    while let Some(chunk)=bytes.get(at..at+8){
+        let len=u32::from_be_bytes(chunk[..4].try_into().unwrap()) as usize;
+        let Some(end)=at.checked_add(12).and_then(|n|n.checked_add(len)) else{return false;};
+        if end>bytes.len(){return false;}
+        let kind=&chunk[4..8];
+        if !header {
+            if kind!=b"IHDR"||len!=13{return false;}
+            let w=u32::from_be_bytes(bytes[at+8..at+12].try_into().unwrap());
+            let h=u32::from_be_bytes(bytes[at+12..at+16].try_into().unwrap());
+            if !(1..=8192).contains(&w)||!(1..=8192).contains(&h){return false;}
+            header=true;
+        } else if kind==b"IHDR" {return false;}
+        if kind==b"IDAT"{pixels=true;}
+        if kind==b"IEND"{return len==0&&header&&pixels&&end==bytes.len();}
+        at=end;
+    }
+    false
+}
+
+fn refreshed_map_image(cached:Option<Vec<u8>>,downloaded:Result<Vec<u8>,String>)->Result<(Vec<u8>,bool),String>{
+    let downloaded=downloaded.and_then(|bytes|if valid_map_png(&bytes){Ok(bytes)}else{
+        Err("Downloaded map image is invalid or incomplete".into())
+    });
+    match downloaded {
+        Ok(bytes)=>Ok((bytes,true)),
+        Err(error)=>match cached.filter(|bytes|valid_map_png(bytes)){
+            Some(bytes)=>{eprintln!("[cache] Map refresh failed: {error}; using valid cached image");Ok((bytes,false))},
+            None=>Err(error),
+        }
+    }
+}
+
 pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Result<Vec<u8>,String>{
     let name=normalize_map_name(map).ok_or("Invalid map name")?;
     if name!=map{return Err("Unexpected map name".into());}
@@ -92,14 +186,105 @@ pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Resu
     candidates.sort_by_key(|(file,_)|file.len());
     let (file,url)=candidates.first().ok_or("No map image for layer")?;
     let path:PathBuf=cache.join(file);
-    let bytes=if path.is_file(){fs::read(path).map_err(|e|e.to_string())?}
-       else{if offline{return Err("Image unavailable offline".into());}let b=download(url,8_000_000)?;if b.starts_with(b"\x89PNG\r\n\x1a\n"){let _=fs::write(&path,&b);}b};
-    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n"){return Err("Invalid PNG".into());}
+    let cached=fs::read(&path).ok();
+    let damaged=cached.as_ref().is_some_and(|bytes|!valid_map_png(bytes));
+    let cached=cached.filter(|bytes|valid_map_png(bytes));
+    if let Some(bytes)=cached.as_ref(){
+        if offline||!map_cache_needs_refresh(&path,cache,SystemTime::now()){return Ok(bytes.clone());}
+    }
+    if offline{return Err(if damaged{"Cached map image is damaged; connect once to refresh it"}else{"Image unavailable offline"}.into());}
+    let (bytes,fresh)=refreshed_map_image(cached,download(url,8_000_000))?;
+    if !fresh{return Ok(bytes);}
+    fs::create_dir_all(cache).map_err(|e|format!("Cannot create map cache: {e}"))?;
+    // Decode callers receive verified complete bytes even if a cache replacement
+    // fails; do not replace a previously good file with a partial download.
+    static NEXT_WRITE:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+    let serial=NEXT_WRITE.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    let temporary=path.with_extension(format!("{}.{serial}.part",std::process::id()));
+    if fs::write(&temporary,&bytes).is_ok(){
+        if fs::rename(&temporary,&path).is_err(){
+            // A locked or otherwise unreplaceable cache entry may block rename.
+            // Remove only an entry still proven invalid, then retry once.
+            if fs::read(&path).is_ok_and(|old|!valid_map_png(&old)){
+                let _=fs::remove_file(&path);let _=fs::rename(&temporary,&path);
+            }
+            let _=fs::remove_file(&temporary);
+        }
+    }
     Ok(bytes)
 }
 
 #[cfg(test)]mod tests{
     use super::*;
+    fn set_modified(path:&Path,time:SystemTime){
+        fs::File::options().write(true).open(path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(time)).unwrap();
+    }
+    #[test]fn refresh_marker_and_24h_expiry_apply_only_to_older_images(){
+        let cache=std::env::temp_dir().join(format!("cas-map-refresh-test-{}",std::process::id()));
+        fs::create_dir_all(&cache).unwrap();let path=cache.join("de_nuke_radar_psd.png");
+        fs::write(&path,include_bytes!("../assets/bomb_ground.png")).unwrap();
+        let now=SystemTime::now();let old=now-Duration::from_secs(86401);
+        set_modified(&path,now-Duration::from_secs(60));
+        assert!(!map_cache_needs_refresh(&path,&cache,now));
+        request_map_image_refresh(&cache,false,true);
+        let marker=cache.join(MAP_REFRESH_MARKER);set_modified(&marker,now);
+        assert!(map_cache_needs_refresh(&path,&cache,now));
+        set_modified(&path,now+Duration::from_secs(1));
+        assert!(!map_cache_needs_refresh(&path,&cache,now));
+        fs::remove_file(&marker).unwrap();set_modified(&path,old);
+        assert!(map_cache_needs_refresh(&path,&cache,now));
+        // Expiry/refresh never prevents offline use of a structurally valid PNG.
+        assert!(map_image("de_nuke","default",&fallback_maps(),&cache,true).is_ok());
+        fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn offline_force_does_not_request_image_refresh(){
+        let cache=std::env::temp_dir().join(format!("cas-offline-refresh-test-{}",std::process::id()));
+        fs::create_dir_all(&cache).unwrap();request_map_image_refresh(&cache,true,true);
+        assert!(!cache.join(MAP_REFRESH_MARKER).exists());
+        request_map_image_refresh(&cache,false,false);assert!(!cache.join(MAP_REFRESH_MARKER).exists());
+        request_map_image_refresh(&cache,false,true);assert!(cache.join(MAP_REFRESH_MARKER).is_file());
+        fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn failed_refresh_keeps_valid_cache_without_accepting_invalid_downloads(){
+        let valid=include_bytes!("../assets/bomb_ground.png").to_vec();
+        let (bytes,fresh)=refreshed_map_image(Some(valid.clone()),Err("network unavailable".into())).unwrap();
+        assert_eq!(bytes,valid);assert!(!fresh);
+        let (bytes,fresh)=refreshed_map_image(Some(valid.clone()),Ok(b"truncated".to_vec())).unwrap();
+        assert_eq!(bytes,valid);assert!(!fresh);
+        let (bytes,fresh)=refreshed_map_image(None,Ok(valid.clone())).unwrap();
+        assert_eq!(bytes,valid);assert!(fresh);
+        assert!(refreshed_map_image(Some(b"broken".to_vec()),Err("network unavailable".into())).is_err());
+        assert!(refreshed_map_image(None,Ok(b"invalid".to_vec())).is_err());
+    }
+    #[test]fn nuke_floor_boundary_uses_default_at_minus_495(){
+        let maps=fallback_maps();let overview=&maps["maps"]["de_nuke"]["radar_info"];
+        assert_eq!(map_layer_for_height(overview,Some(-600.)),"lower");
+        assert_eq!(map_layer_for_height(overview,Some(-495.)),"default");
+        assert_eq!(map_layer_for_height(overview,Some(0.)),"default");
+        assert_eq!(map_layer_for_height(overview,None),"default");
+        assert_eq!(map_layer_for_height(overview,Some(f32::NAN)),"default");
+    }
+    #[test]fn truncated_png_is_not_a_usable_cached_map(){
+        let image=include_bytes!("../assets/bomb_ground.png");
+        assert!(valid_map_png(image));assert!(!valid_map_png(&image[..image.len()-5]));
+        assert!(!valid_map_png(b"\x89PNG\r\n\x1a\n"));
+        let path=std::env::temp_dir().join(format!("cas-map-cache-test-{}",std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        let cached=path.join("de_nuke_radar_psd.png");fs::write(&cached,b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(map_image("de_nuke","default",&fallback_maps(),&path,true).unwrap_err().contains("damaged"));
+        fs::write(&cached,image).unwrap();
+        assert_eq!(map_image("de_nuke","default",&fallback_maps(),&path,true).unwrap(),image);
+        fs::remove_dir_all(path).unwrap();
+    }
+    #[test]fn cached_nuke_floor_paths_are_distinct(){
+        let path=std::env::temp_dir().join(format!("cas-nuke-layer-test-{}",std::process::id()));
+        fs::create_dir_all(&path).unwrap();let image=include_bytes!("../assets/bomb_ground.png");
+        fs::write(path.join("de_nuke_lower_radar_psd.png"),image).unwrap();
+        assert!(map_image("de_nuke","default",&fallback_maps(),&path,true).is_err());
+        assert_eq!(map_image("de_nuke","lower",&fallback_maps(),&path,true).unwrap(),image);
+        fs::remove_dir_all(path).unwrap();
+    }
     #[test]fn maps_valid(){let m=fallback_maps();assert!(m["maps"]["de_mirage"]["radar_info"]["scale"].is_number());}
     #[test]fn reject_path(){assert!(map_image("../bad","default",&fallback_maps(),Path::new("cache"),true).is_err());}
     #[test]fn known_sites(){assert_eq!(bombsites_for_map("de_mirage"),Some([[0.54,0.76],[0.23,0.28]]));assert_eq!(bombsites_for_map("de_vertigo"),Some([[0.705,0.585],[0.222,0.223]]));}

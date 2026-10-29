@@ -4,8 +4,8 @@
 use crate::process::Memory;
 use std::collections::BTreeSet;
 
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub struct RecoveredGlobals {pub entity_list_offset:u64,pub local_controller_offset:u64}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct RecoveredGlobals {pub entity_list_offset:u64,pub local_controller_offset:u64,pub additional_offsets:Vec<(&'static str,u64)>}
 #[derive(Clone,Copy)]
 struct Section {start:u64,end:u64,flags:u32}
 const EXEC:u32=0x2000_0000;
@@ -46,15 +46,36 @@ fn sections<M:Memory>(p:&mut M,base:u64)->Option<(u64,Vec<Section>)>{
     if sections.windows(2).any(|s|s[0].end>s[1].start){return None;}
     Some((image,sections))
 }
-fn collect(bytes:&[u8],rva:u64,matches:&mut [BTreeSet<u64>;2]){
+// Additional globals must be recovered together with the player globals;
+// mixing fresh entity addresses with old clock/map/C4 addresses breaks Nuke
+// selection and bomb timers after an update. Patterns are from the same
+// a2x/cs2-dumper src/analysis/offsets.rs source as the primary signatures.
+struct Signature {name:&'static str,bytes:&'static [i16],rip:usize}
+const EXTRA:&[Signature]=&[
+ Signature{name:"dwGlobalVars",bytes:&[0x48,0x89,0x15,-1,-1,-1,-1,0x48,0x89,0x42],rip:0},
+ Signature{name:"dwPlantedC4",bytes:&[0x48,0x8b,0x1d,-1,-1,-1,-1,0x45,0x32,0xf6],rip:0},
+ Signature{name:"dwWeaponC4",bytes:&[0x48,0x8b,0x15,-1,-1,-1,-1,0x48,0x8b,0x5c,0x24,-1,0xff,0xc0,0x89,0x05,-1,-1,-1,-1,0x48,0x8b,0xc6,0x48,0x89,0x34,0xea,0x80,0xbe],rip:0},
+ Signature{name:"dwGameRules",bytes:&[0xf6,0xc1,0x01,0x0f,0x85,-1,-1,-1,-1,0x4c,0x8b,0x05,-1,-1,-1,-1,0x4d,0x85],rip:9},
+ Signature{name:"dwGameEntitySystem",bytes:&[0x48,0x8b,0x1d,-1,-1,-1,-1,0x48,0x89,0x1d,-1,-1,-1,-1,0x4c,0x63,0xb3],rip:0},
+ Signature{name:"dwPrediction",bytes:&[0x48,0x8d,0x05,-1,-1,-1,-1,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0x40,0x53,0x56,0x41,0x54],rip:0},
+ // This callback's u32 is a field offset inside dwPrediction, not a RIP displacement.
+ Signature{name:"prediction_pawn_field",bytes:&[0x4c,0x39,0xb6,-1,-1,-1,-1,0x74,-1,0x44,0x88,0xbe],rip:0},
+];
+fn collect(bytes:&[u8],rva:u64,matches:&mut [BTreeSet<u64>]){
     for i in 0..bytes.len(){
         let rest=&bytes[i..];
         if rest.len()>=13&&rest[..3]==[0x48,0x89,0x0d]&&rest[7]==0xe9&&rest[12]==0xcc{matches[0].insert(rva+i as u64);}
         if rest.len()>=10&&rest[..3]==[0x48,0x8b,0x05]&&rest[7..10]==[0x41,0x89,0xbe]{matches[1].insert(rva+i as u64);}
-        if matches.iter().any(|m|m.len()>1){return;}
+        if matches[..2].iter().any(|m|m.len()>1){return;}
+        for (kind,pattern) in EXTRA.iter().enumerate(){
+            if matches[kind+2].len()<2 && rest.len()>=pattern.bytes.len()
+                && rest.iter().zip(pattern.bytes).all(|(byte,want)|*want<0||*byte==*want as u8){
+                matches[kind+2].insert(rva+i as u64);
+            }
+        }
     }
 }
-fn scan<M:Memory>(p:&mut M,base:u64,section:Section,matches:&mut [BTreeSet<u64>;2]){
+fn scan<M:Memory>(p:&mut M,base:u64,section:Section,matches:&mut [BTreeSet<u64>]){
     let mut at=section.start;let mut tail=Vec::new();
     while at<section.end{
         let len=(section.end-at).min(CHUNK as u64) as usize;
@@ -67,8 +88,8 @@ fn scan<M:Memory>(p:&mut M,base:u64,section:Section,matches:&mut [BTreeSet<u64>;
             if let Some(bytes)=bytes{
                 let mut joined=tail.clone();joined.extend_from_slice(&bytes);
                 collect(&joined,at+inside as u64-tail.len() as u64,matches);
-                if matches.iter().any(|m|m.len()>1){return;}
-                tail=joined[joined.len().saturating_sub(16)..].to_vec();
+                if matches[..2].iter().any(|m|m.len()>1){return;}
+                tail=joined[joined.len().saturating_sub(32)..].to_vec();
             }else{tail.clear();}
             inside+=n;
         }
@@ -96,19 +117,39 @@ fn controller_in_list<M:Memory>(p:&mut M,list:u64,controller:u64)->bool{
     false
 }
 pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlobals>{
-    let (_,sections)=sections(p,base)?;let mut matches=[BTreeSet::new(),BTreeSet::new()];
+    let (_,sections)=sections(p,base)?;let mut matches:Vec<BTreeSet<u64>>=(0..2+EXTRA.len()).map(|_|BTreeSet::new()).collect();
     for section in sections.iter().filter(|s|s.flags&EXEC!=0){
         scan(p,base,*section,&mut matches);
-        if matches.iter().any(|m|m.len()>1){return None;}
+        if matches[..2].iter().any(|m|m.len()>1){return None;}
     }
-    if matches.iter().any(|m|m.len()!=1){return None;}
+    if matches[..2].iter().any(|m|m.len()!=1){return None;}
     let entity_list_offset=global_target(p,base,*matches[0].first()?,&sections)?;
     let local_controller_offset=global_target(p,base,*matches[1].first()?,&sections)?;
     if entity_list_offset==local_controller_offset{return None;}
     let list=pointer(p,base+entity_list_offset).filter(|v|canonical(*v))?;
     let controller=pointer(p,base+local_controller_offset).filter(|v|canonical(*v))?;
     if !controller_in_list(p,list,controller){return None;}
-    Some(RecoveredGlobals{entity_list_offset,local_controller_offset})
+    let mut additional_offsets=Vec::new();let mut prediction=None;
+    for (i,pattern) in EXTRA.iter().enumerate(){
+        if matches[i+2].len()!=1 || pattern.name=="prediction_pawn_field"{continue;}
+        let at=*matches[i+2].first()?+pattern.rip as u64;
+        if let Some(offset)=global_target(p,base,at,&sections){
+            if pattern.name=="dwPrediction"{prediction=Some(offset);}
+            additional_offsets.push((pattern.name,offset));
+        }
+    }
+    let pawn_matches=&matches[2+EXTRA.len()-1];
+    if let Some(prediction)=prediction.filter(|_|pawn_matches.len()==1){
+        if let Some(raw)=p.read(base+*pawn_matches.first()?+3,4){
+            if let Some(field)=u32_at(&raw,0).filter(|v|*v<=0x10000){
+                let offset=prediction+field as u64;
+                if sections.iter().any(|s|s.flags&READ!=0&&s.flags&EXEC==0&&offset>=s.start&&offset+8<=s.end){
+                    additional_offsets.push(("dwLocalPlayerPawn",offset));
+                }
+            }
+        }
+    }
+    Some(RecoveredGlobals{entity_list_offset,local_controller_offset,additional_offsets})
 }
 
 #[cfg(test)]mod tests{
@@ -133,7 +174,7 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
         p.put(0x200010,&0x300000u64.to_le_bytes());p.put(0x300000+3*0x78,&0x400000u64.to_le_bytes());p
     }
     #[test]fn recovers_signed_rip_displacements_and_validates_controller(){
-        assert_eq!(recover_player_globals(&mut fixture(),BASE),Some(RecoveredGlobals{entity_list_offset:0x1100,local_controller_offset:0x1110}));
+        assert_eq!(recover_player_globals(&mut fixture(),BASE),Some(RecoveredGlobals{entity_list_offset:0x1100,local_controller_offset:0x1110,additional_offsets:vec![]}));
     }
     #[test]fn finds_signature_crossing_a_chunk_boundary_without_duplicate_matches(){
         let mut p=fixture();p.put(BASE+0x3100,&[0;13]);signature(&mut p,0x3000+CHUNK as u64-6,0x1100,true);
@@ -174,6 +215,30 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
             if frame==0{assert_eq!(snapshot.diagnostics["runtime_recovery_attempted"],true);}
             else{assert!(snapshot.diagnostics.get("runtime_recovery_attempted").is_none());}
         }
+    }
+    fn extra_signature(p:&mut FakeMemory,index:usize,at:u64,target:u64){
+        let pattern=&EXTRA[index];
+        let mut bytes:Vec<u8>=pattern.bytes.iter().map(|b|if *b<0{0}else{*b as u8}).collect();
+        let rip=pattern.rip;
+        let disp=if pattern.name=="prediction_pawn_field"{0x50}else{(target as i64-at as i64-rip as i64-7) as i32};
+        bytes[rip+3..rip+7].copy_from_slice(&disp.to_le_bytes());p.put(BASE+at,&bytes);
+    }
+    #[test]fn recovers_clock_map_and_bomb_globals_together_with_players(){
+        let mut memory=fixture();
+        for i in 0..EXTRA.len(){extra_signature(&mut memory,i,0x3500+i as u64*0x50,0x1140+i as u64*0x10);}
+        let recovered=recover_player_globals(&mut memory,BASE).unwrap();
+        assert!(recovered.additional_offsets.contains(&("dwGlobalVars",0x1140)));
+        assert!(recovered.additional_offsets.contains(&("dwPlantedC4",0x1150)));
+        assert!(recovered.additional_offsets.contains(&("dwGameRules",0x1170)));
+        assert!(recovered.additional_offsets.contains(&("dwLocalPlayerPawn",0x11e0)));
+        assert!(recovered.additional_offsets.contains(&("dwGameEntitySystem",0x1180)));
+    }
+    #[test]fn ambiguous_auxiliary_signature_does_not_break_valid_player_recovery(){
+        let mut memory=fixture();extra_signature(&mut memory,0,0x3500,0x1140);extra_signature(&mut memory,0,0x3600,0x1140);
+        extra_signature(&mut memory,1,0x3700,0x1150);
+        let recovered=recover_player_globals(&mut memory,BASE).unwrap();
+        assert!(!recovered.additional_offsets.iter().any(|(name,_)|*name=="dwGlobalVars"));
+        assert!(recovered.additional_offsets.contains(&("dwPlantedC4",0x1150)));
     }
     #[test]fn rejects_bad_pe_outside_targets_or_unvalidated_pointers(){
         let mut p=fixture();put32(&mut p,BASE+0x98+56,0x40000000);assert!(recover_player_globals(&mut p,BASE).is_none());

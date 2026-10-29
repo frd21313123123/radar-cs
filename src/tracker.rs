@@ -5,12 +5,14 @@ use std::time::{Instant,Duration};
 #[derive(Default)]
 pub struct BombTracker {
     carrier:Option<u32>,last_confirmed:Option<Instant>,negative_since:Option<Instant>,map:Option<String>,
-    world:Option<(Instant,BombWorld)>,
+    world:Option<(Instant,BombWorld)>,pid:u32,
 }
 impl BombTracker {
     pub fn reset(&mut self){*self=Self::default();}
     pub fn update(&mut self,s:&mut Snapshot,now:Instant,map:&str){
-        if self.map.as_deref().is_some_and(|m|m!=map) && !map.is_empty(){self.reset();}
+        if (self.pid!=0&&self.pid!=s.pid)
+            || (self.map.as_deref().is_some_and(|m|m!=map)&&!map.is_empty()){self.reset();}
+        self.pid=s.pid;
         if !map.is_empty(){self.map=Some(map.into());}
         let by_id=|id:u32| s.players.iter().find(|p|p.id==id);
         if s.details_read {
@@ -62,6 +64,25 @@ impl BombTracker {
 
 #[cfg(test)]mod tests{
     use super::*;use crate::model::demo_snapshot;
+    #[test]fn a_new_process_does_not_inherit_the_previous_carrier(){
+        let mut tracker=BombTracker::default();let at=Instant::now();
+        let mut old=demo_snapshot(0.);old.pid=100;old.details_read=true;
+        tracker.update(&mut old,at,"de_mirage");assert_eq!(old.bomb_carrier_id,Some(2));
+        let mut new=demo_snapshot(0.);new.pid=101;new.details_read=true;
+        for p in &mut new.players{p.has_c4=Some(false);}
+        new.bomb_carrier_id=None;
+        tracker.update(&mut new,at+Duration::from_millis(100),"de_mirage");
+        assert!(new.bomb_carrier_id.is_none());
+    }
+    #[test]fn a_new_process_does_not_inherit_the_previous_world_marker(){
+        let mut tracker=BombTracker::default();let at=Instant::now();
+        let mut old=demo_snapshot(0.);old.pid=100;old.details_read=true;
+        old.bomb_world=Some(BombWorld{position:[100.,200.,0.],status:"dropped".into(),source:"entity".into()});
+        tracker.update(&mut old,at,"de_mirage");
+        let mut new=demo_snapshot(0.);new.pid=101;new.details_read=false;
+        tracker.update(&mut new,at+Duration::from_millis(100),"de_mirage");
+        assert!(new.bomb_world.is_none());
+    }
     #[test]fn switch_weapon_keeps_bomb(){
         let mut tr=BombTracker::default();let at=Instant::now();let mut snap=demo_snapshot(1.);
         snap.details_read=true;tr.update(&mut snap,at,"de_mirage");assert_eq!(snap.bomb_carrier_id,Some(2));

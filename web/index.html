@@ -148,7 +148,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 <main><aside class="side-column side-t" aria-label="Террористы">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on t" id="tButton">TERRORISTS <span class="number" id="tCount">0</span></button></div><input class="filter" id="search" placeholder="Поиск по игрокам…" autocomplete="off"></div>
 <div class="team-status" id="tStatus">Состав команды · T</div><div id="tPlayers" class="players"></div>
-</aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Mirage</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="de_mirage">Mirage</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select"><option value="default">UPPER</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
+</aside><section class="map-column"><div class="section-head"><div><div class="eyebrow">LIVE TACTICAL OVERVIEW</div><div class="heading"><h1 id="mapName">Карта не определена</h1><span class="sub">/ top-down intelligence</span></div></div><div class="control-row"><select aria-label="Карта" id="mapSelect" class="map-select"><option value="">Выберите карту…</option></select><button class="small-btn active" id="autoMapBtn" title="Автоматическое определение карты по игре (GSI / память)">AUTO</button><select aria-label="Этаж" id="layerSelect" class="view-select" disabled><option value="default">Этаж</option></select><button class="small-btn" id="namesBtn" title="Показывать имена">NAMES</button><button class="small-btn" id="settingsBtn" title="Настройки игроков и цветов">⚙ COLORS</button><button class="small-btn active" id="miniBtn" title="Открыть настройки отдельного окна">▣ MINI</button><button class="small-btn" id="diagBtn" title="Скопировать данные диагностики для исправления радара">DIAG</button></div></div>
 <div class="map-wrap" id="mapWrap"><canvas id="mapBase"></canvas><canvas id="radar" role="img" aria-label="Карта игроков: ХП, оружие, стрелки высоты и белый крест ослепления. Данные каждого игрока доступны в карточках по сторонам."></canvas>
 <div class="bomb-countdown" id="bombTimerPanel" hidden aria-label="Время до взрыва C4">
   <div class="bomb-ring"><svg viewBox="0 0 48 48" aria-hidden="true">
@@ -157,7 +157,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
   </svg><span class="bomb-symbol">▣</span></div>
   <div class="bomb-fields"><div>Плэнт: <b id="bombTimerSite">?</b></div>
     <div class="bomb-time-number"><span id="bombTimerSecs">—</span><small style="font-size:12px"> сек</small></div></div>
-</div><div class="radar-label"><em id="mapCode">DE_MIRAGE</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
+</div><div class="radar-label"><em id="mapCode">КАРТА НЕ ОПРЕДЕЛЕНА</em> · RADAR FEED</div><div class="radar-right"><button class="radar-tool" id="zoomIn" title="Приблизить">+</button><button class="radar-tool" id="zoomOut" title="Отдалить">−</button><button class="radar-tool" id="resetView" title="Сбросить вид">⌖</button></div><div id="notice">Ожидание данных…</div></div>
 <div class="legend"><div><span class="key"><i class="friend"></i> СОЮЗНИКИ</span><span class="key"><i class="enemy"></i> ВРАГИ</span><span class="key"><i class="you"></i> ВЫ</span></div><span class="hint">КОЛЕСО — МАСШТАБ · ПЕРЕТАСКИВАНИЕ — КАРТА</span><div class="telemetry-key"><span><b>↑ / ↓</b> выше / ниже вас</span><span><b>ХП</b> здоровье</span><span><b>⤨</b> белый крест — ослеплён</span><span><b>~</b> таймер по наблюдению</span></div></div></section><aside class="side-column side-ct" aria-label="Спецназ">
 <div class="side-head"><div class="side-top"><span class="eyebrow">TEAM LINEUP</span><button class="team-button on" id="ctButton">COUNTER-TER. <span class="number" id="ctCount">0</span></button></div><div class="side-summary"><span id="totalCount">0 TRACKED</span><span id="bombStatus">C4 · не обнаружена</span></div></div>
 <div class="team-status" id="ctStatus">Состав команды · CT</div><div id="ctPlayers" class="players"></div>
@@ -207,9 +207,10 @@ const token=new URLSearchParams(location.search).get('token')||'';
 const api=(route)=>route+(route.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
 const droppedC4Icon=new Image();droppedC4Icon.src=api('/api/bomb-icon');
 const radar=$('radar'),ctx=radar.getContext('2d',{alpha:true}),mapBase=$('mapBase'),baseCtx=mapBase.getContext('2d',{alpha:false}),wrap=$('mapWrap');
-let maps={},map='de_mirage',layer='default',autoMapEnabled=true,snapshot={status:'starting',players:[]},mapImg=null,showNames=false,selected=null;
+let maps={},map='',layer='default',autoMapEnabled=true,snapshot={status:'starting',players:[]},mapImg=null,showNames=false,selected=null;
 let ct=true,t=true,scale=1,panX=0,panY=0,baseSide=500,rect={width:1,height:1};
 let dragging=false,pointerStart=null,hovered=null,lastMapImageKey='';
+let mapImageError='',mapSelectionError='',mapSelectionPending=false;
 let baseCacheKey='',mapVersion=0,lastDraw=0,fpsBegin=performance.now(),fpsFrames=0;
 let motions=new Map(),motionMs=120,lastSampleAt=0,lastSampleId=null,lastListKey='',snapshotReceivedAt=0;
 const DEFAULT_PREFS={friend:'#3b82f6',enemy:'#ef4444',own:'#22c55e',showDead:false,showUnknown:false,showDirection:true,showNoise:true,showSites:true,showSmokes:true,showFire:true,showPaths:true,showBombTimer:true};
@@ -279,19 +280,64 @@ function equipmentIcon(name,extraClass=''){
  return `<span class="equip-chip ${utility?'utility ':''}${extraClass}" title="${safeText(text)}"><img loading="lazy" src="${safeText(api('/api/weapon-icon?weapon='+encodeURIComponent(text)))}" alt=""><span>${safeText(label)}</span></span>`;
 }
 
+function mapKnown(){return Boolean(map&&maps[map]?.radar_info?.scale);}
 function mapData(){return maps[map]||{display_name:map,radar_info:{pos_x:0,pos_y:0,scale:5},radar_paths:[]};}
 function setNotice(text){$('notice').textContent=text||'';$('notice').classList.toggle('show',!!text);}
-function setMap(v){if(!maps[v])return;map=v;layer='default';scale=1;panX=panY=0;selected=null;mapImg=null;mapVersion++;
-  const m=mapData();$('mapName').textContent=m.display_name||map;$('mapCode').textContent=map.toUpperCase();$('mapSelect').value=map;
-  $('layerSelect').innerHTML='';const levels=m.radar_info?.verticalsections||{};
-  const possible=['default',...Object.keys(levels).filter(x=>x!=='default')];for(const l of [...new Set(possible)]){
-    const opt=document.createElement('option');opt.value=l;opt.textContent=l==='default'?'UPPER':l.toUpperCase();$('layerSelect').appendChild(opt);}
-  loadMapImage();}
-async function loadMapImage(){let key=map+'/'+layer;lastMapImageKey=key;mapImg=null;mapVersion++;
-  const m=mapData();if(!m.radar_paths?.length){setNotice('Для этой карты нет доступного изображения радара.');return;}
-  let img=new Image();img.onload=()=>{if(key===lastMapImageKey){mapImg=img;mapVersion++;baseCacheKey='';setNotice('');}};
-  img.onerror=()=>{if(key===lastMapImageKey){mapImg=null;setNotice('Изображение карты недоступно. Подключите интернет или проверьте cache.');}};
-  img.src=api('/api/map-image?map='+encodeURIComponent(map)+'&layer='+encodeURIComponent(layer));}
+function clearMap(){
+ map='';mapImg=null;mapImageError='';lastMapImageKey='';mapVersion++;baseCacheKey='';
+ layer='default';scale=1;panX=panY=0;
+ $('mapName').textContent='Карта не определена';$('mapCode').textContent='КАРТА НЕ ОПРЕДЕЛЕНА';$('mapSelect').value='';
+ $('layerSelect').innerHTML='<option value="default">Этаж</option>';$('layerSelect').disabled=true;
+}
+function setMap(v){if(!maps[v])return;map=v;layer='default';scale=1;panX=panY=0;selected=null;mapImg=null;mapImageError='';mapVersion++;
+ const m=mapData();$('mapName').textContent=m.display_name||map;$('mapCode').textContent=map.toUpperCase();$('mapSelect').value=map;
+ $('layerSelect').innerHTML='';const levels=m.radar_info?.verticalsections||{};
+ const possible=['default',...Object.keys(levels).filter(x=>x!=='default')];for(const l of [...new Set(possible)]){
+   const opt=document.createElement('option');opt.value=l;opt.textContent=l==='default'?(possible.length>1?'Верхний':'Основной'):l==='lower'?'Нижний':l.toUpperCase();$('layerSelect').appendChild(opt);}
+ $('layerSelect').disabled=possible.length<2;
+ loadMapImage();}
+async function loadMapImage(){
+ if(!mapKnown())return;
+ let key=map+'/'+layer;lastMapImageKey=key;mapImg=null;mapImageError='';mapVersion++;
+ const m=mapData();if(!m.radar_paths?.length){mapImageError='Для этой карты нет доступного изображения радара.';updateStatus();return;}
+ let img=new Image();img.onload=()=>{if(key===lastMapImageKey){mapImg=img;mapImageError='';mapVersion++;baseCacheKey='';updateStatus();}};
+ img.onerror=()=>{if(key===lastMapImageKey){mapImg=null;mapImageError='Изображение карты недоступно. Проверьте подключение; координаты показаны на сетке.';updateStatus();}};
+ img.src=api('/api/map-image?map='+encodeURIComponent(map)+'&layer='+encodeURIComponent(layer));}
+function applyMapState(data){
+ if(!mapSelectionPending&&data.game_map_source==='manual'&&data.game_map&&maps[data.game_map]){
+   autoMapEnabled=false;if(map!==data.game_map)setMap(data.game_map);
+ }
+ else if(autoMapEnabled){
+   if(data.game_map&&maps[data.game_map]){if(map!==data.game_map)setMap(data.game_map);}
+   else if(map)clearMap();
+ }
+ $('autoMapBtn').classList.toggle('active',autoMapEnabled);
+ $('autoMapBtn').setAttribute('aria-pressed',String(autoMapEnabled));
+ $('autoMapBtn').title=autoMapEnabled
+   ? 'AUTO включено: '+(data.game_map||'карта не определена')+' / '+(data.game_map_source||'нет сигнала')
+   : 'Карта выбрана вручную для обеих карт. Нажмите, чтобы вернуть AUTO.';
+}
+async function selectSharedMap(value){
+ if(mapSelectionPending)return;
+ const previousAuto=autoMapEnabled;
+ mapSelectionPending=true;mapSelectionError='';autoMapEnabled=false;
+ $('mapSelect').disabled=true;$('autoMapBtn').disabled=true;updateStatus();
+ try{
+   const res=await fetch(api('/api/map-selection'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map:value})});
+   const data=await res.json();if(!res.ok)throw Error(data.error||'HTTP '+res.status);
+   if(value!==null&&(!data.game_map||!maps[data.game_map]))throw Error('Сервер не подтвердил выбор карты');
+   autoMapEnabled=value===null;
+   snapshot={...snapshot,game_map:data.game_map||'',game_map_source:data.game_map_source||''};
+   if(value!==null)setMap(data.game_map);
+   applyMapState(snapshot);
+ }catch(e){
+   autoMapEnabled=previousAuto;$('mapSelect').value=map;
+   mapSelectionError='Не удалось синхронизировать карту с мини-картой: '+e.message;
+   applyMapState(snapshot);
+ }finally{
+   mapSelectionPending=false;$('mapSelect').disabled=false;$('autoMapBtn').disabled=false;updateStatus();
+ }
+}
 function transform(p){const d=mapData().radar_info||{};const k=Number(d.scale)||5;const x=Number(d.pos_x)||0,y=Number(d.pos_y)||0;
   // Original Valve overview calibration uses a canonical 1024x1024 radar coordinate grid.
   // Some overview files have rotate=1; the same Valve world-to-radar convention applies.
@@ -331,12 +377,7 @@ function acceptSnapshot(data){
    }motions=next;lastSampleAt=now;lastSampleId=data.time;
  }
  snapshot=data;if(changed)snapshotReceivedAt=now;
- if(autoMapEnabled && data.game_map && maps[data.game_map] && map!==data.game_map){
-   setMap(data.game_map);
- }
- $('autoMapBtn').title=autoMapEnabled
-   ? 'AUTO включено: '+(data.game_map||'ожидание карты')+' / '+(data.game_map_source||'нет сигнала')
-   : 'AUTO отключено: нажмите, чтобы синхронизировать с CS2';
+ applyMapState(data);
 }
 function smoothedYaw(p,now){const m=motions.get(p.id);if(!m||!Number.isFinite(m.toYaw)||!Number.isFinite(m.fromYaw))return p.yaw;
  return m.fromYaw+shortestYawDelta(m.fromYaw,m.toYaw)*Math.max(0,Math.min(1,(now-m.at)/motionMs));}
@@ -347,8 +388,8 @@ function updateBombCountdown(){
    ||!Number.isFinite(bomb.total_secs)||bomb.total_secs<=0){
    panel.hidden=true;return;
  }
- // Server snapshot is timestamped on the same machine; animate at RAF rate.
- const age=Math.max(0,Math.min(1.5,Date.now()/1000-Number(snapshot.time||0)));
+ // The browser may run on another LAN device with a different wall clock.
+ const age=snapshotAge();
  const seconds=Math.max(0,bomb.remaining_secs-age);
  if(seconds<=0){panel.hidden=true;return;}
  panel.hidden=false;
@@ -367,6 +408,7 @@ function draw(now){requestAnimationFrame(draw);
  if(now-fpsBegin>=1000){$('fpsHud').textContent='FPS '+Math.round(fpsFrames*1000/(now-fpsBegin));fpsFrames=0;fpsBegin=now;}
  renderBackground();
  const w=rect.width,h=rect.height;ctx.clearRect(0,0,w,h);
+ if(!mapKnown())return;
  const size=baseSide*scale,left=w/2-size/2+panX,top=h/2-size/2+panY;
  ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
  const people=smoothShown(now),reference=referencePosition();
@@ -547,12 +589,19 @@ function updateStatus(){
  $('footerText').textContent=live?'PROCESS '+snapshot.pid+' · '+(snapshot.players||[]).length+' PLAYERS':
    partial?'POSSIBLE PLAYERS · HP UNVERIFIED':demo?'DEMO DATA · NOT CONNECTED TO GAME':empty?'GAME OPEN · ENTITY READ FAILED':
    v==='error'?'READER ERROR':'WAITING FOR GAME';
- if(empty){setNotice(diagnosis());}
+ if(mapSelectionPending){setNotice('Синхронизация карты с мини-картой…');}
+ else if(mapSelectionError){setNotice(mapSelectionError);}
+ else if(!mapKnown()){
+   const unknown=snapshot.game_map?'Нет схемы карты '+snapshot.game_map+'.':'Карта не определена автоматически.';
+   setNotice(unknown+' Выберите текущую карту в списке сверху — выбор применится и к мини-карте.'+(snapshot.message?'\n'+snapshot.message:''));
+ }
+ else if(empty){setNotice(diagnosis());}
  else if(partial){setNotice((snapshot.message||'Не все данные игроков подтверждены.')+' Нажми DIAG.');}
  else if(v==='error'||v==='waiting'){
    setNotice((snapshot.message||'Ожидание данных CS2')+'\nПроверьте консоль приложения.');
  }else if(live&&snapshot.message){setNotice(snapshot.message+' Нажми DIAG для подробностей.');}
- else if((live||demo)&&mapImg){setNotice('');}
+ else if(mapImageError){setNotice(mapImageError);}
+ else if(live||demo){setNotice('');}
 }
 
 async function poll(){try{const r=await fetch(api('/api/state'),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);acceptSnapshot(await r.json());updateStatus();repaintPlayers();}
@@ -560,12 +609,11 @@ catch(e){$('statusText').textContent='DISCONNECTED';$('statusDot').className='do
 async function init(){loadPrefs();fit();window.addEventListener('resize',fit);
   // The radar container may change size without a browser window resize.
   if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const r=await fetch(api('/api/maps'));if(!r.ok)throw Error('Map list HTTP '+r.status);maps=(await r.json()).maps||{};
-  let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale&&maps[k].radar_paths?.length).sort();$('mapSelect').innerHTML=keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
-  let saved=null;try{saved=localStorage.getItem('cas-map');}catch(_){}
-  setMap(maps[saved]?saved:maps['de_mirage']?'de_mirage':keys[0]);
+  let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale).sort();$('mapSelect').innerHTML='<option value="">Выберите карту…</option>'+keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
+  clearMap();
 }catch(e){setNotice('Не удалось получить список карт: '+e.message);}poll();requestAnimationFrame(draw);}
-$('mapSelect').addEventListener('change',e=>{autoMapEnabled=false;$('autoMapBtn').classList.remove('active');setMap(e.target.value);try{localStorage.setItem('cas-map',map);}catch(_){}});
-$('autoMapBtn').addEventListener('click',()=>{autoMapEnabled=!autoMapEnabled;$('autoMapBtn').classList.toggle('active',autoMapEnabled);if(autoMapEnabled && snapshot.game_map && maps[snapshot.game_map])setMap(snapshot.game_map);});
+$('mapSelect').addEventListener('change',e=>{if(e.target.value)selectSharedMap(e.target.value);else $('mapSelect').value=map;});
+$('autoMapBtn').addEventListener('click',()=>{if(!autoMapEnabled)selectSharedMap(null);else if(mapKnown())selectSharedMap(map);});
 $('layerSelect').addEventListener('change',e=>{layer=e.target.value;loadMapImage();});
 $('namesBtn').addEventListener('click',()=>{showNames=!showNames;$('namesBtn').classList.toggle('active',showNames);});
 $('settingsBtn').addEventListener('click',()=>{openSettings();});
@@ -585,7 +633,7 @@ async function updateNativeSettings(){try {
  $('nativeOpacity').value=d.settings?.opacity??100;$('nativeOpacityLabel').textContent=$('nativeOpacity').value+'%';
  $('nativeOverlayPanel').querySelectorAll('input').forEach(el=>el.disabled=!nativeAvailable);
  $('miniBtn').classList.toggle('active',Boolean(d.settings?.visible));
- if(nativeAvailable && ['friend','enemy','own'].some(k=>d.settings?.[k+'_color']!==prefs[k])){
+ if(nativeAvailable && ['friend','enemy','own'].some(k=>d.settings?.[k==='own'?'self_color':k+'_color']!==prefs[k])){
    nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});
  }
 }catch(e){nativeAvailable=false;$('overlayStatus').textContent='Ошибка: '+e.message;}}
@@ -621,7 +669,8 @@ for(const [key,id] of [['showDead','showDead'],['showUnknown','showUnknown'],['s
     try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
 }
 $('resetSettings').addEventListener('click',()=>{prefs={...DEFAULT_PREFS};applyPrefs();
-  try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();});
+  try{localStorage.setItem('cas-radar-v06-settings',JSON.stringify(prefs));}catch(_){ }repaintPlayers();
+  if(nativeAvailable)nativeChange({friend_color:prefs.friend,enemy_color:prefs.enemy,self_color:prefs.own});});
 
 $('diagBtn').addEventListener('click',async()=>{
   const d={status:snapshot.status,message:snapshot.message,game_map:snapshot.game_map,game_map_source:snapshot.game_map_source,diagnostics:snapshot.diagnostics};

@@ -66,11 +66,42 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             let r=stream.read(&mut buf)?;if r==0{break;}body.extend_from_slice(&buf[..r]);
             if body.len()>32768{return reply_json(&mut stream,413,json!({"error":"body too large"}));}
         }
-        let value:Value=match serde_json::from_slice(&body[..len.min(body.len())]){Ok(v)=>v,Err(_)=>return reply_json(&mut stream,400,json!({"error":"invalid JSON"}))};
+        if body.len()<len{return reply_json(&mut stream,400,json!({"error":"incomplete GSI payload"}));}
+        let value:Value=match serde_json::from_slice(&body[..len]){Ok(v)=>v,Err(_)=>return reply_json(&mut stream,400,json!({"error":"invalid JSON"}))};
         let token=value.get("auth").and_then(|v|v.get("token")).and_then(Value::as_str).unwrap_or("");
         if !gsi::token_equal(token,&server.gsi_token){return reply_json(&mut stream,403,json!({"error":"GSI token invalid"}));}
-        if let Some(name)=gsi::gsi_map(&value){if let Ok(mut s)=server.state.lock(){s.set_map(&name,"gsi");}}
+        if let Ok(mut state)=server.state.lock(){
+            // An explicit map removal is authoritative; quiet/missing fields
+            // retain the last map, and manual selection remains independent.
+            if value.get("map")==Some(&Value::Null){state.clear_automatic_map();}
+            else if let Some(name)=gsi::gsi_map(&value){state.set_map(&name,"gsi");}
+        }
         return reply_json(&mut stream,200,json!({"ok":true}));
+    }
+    // Main and native maps share one explicit selection. JSON + token keeps
+    // this mutation within the authenticated same-origin UI, just like overlay.
+    if method=="POST" && path=="/api/map-selection" {
+        if query_arg(query,"token")!=Some(server.token.as_str()){
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        let headers:Vec<(&str,&str)>=lines.filter_map(|l|l.split_once(':')).collect();
+        let ctype=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Type")).map(|(_,v)|v.trim()).unwrap_or("");
+        if !ctype.starts_with("application/json"){return reply_json(&mut stream,400,json!({"error":"expected application/json"}));}
+        let len=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Length")).and_then(|(_,v)|v.trim().parse::<usize>().ok());
+        let len=match len{Some(n) if n>0&&n<=512=>n,_=>return reply_json(&mut stream,413,json!({"error":"invalid selection size"}))};
+        let mut body=header[boundary..].to_vec();
+        while body.len()<len{
+            let count=stream.read(&mut buf)?;if count==0{break;}
+            body.extend_from_slice(&buf[..count]);
+            if body.len()>512{return reply_json(&mut stream,413,json!({"error":"selection too large"}));}
+        }
+        if body.len()<len{return reply_json(&mut stream,400,json!({"error":"incomplete selection"}));}
+        let value:Value=match serde_json::from_slice(&body[..len]){Ok(v)=>v,Err(_)=>return reply_json(&mut stream,400,json!({"error":"invalid JSON"}))};
+        let selected=match value.get("map"){Some(Value::Null)=>None,Some(Value::String(s))=>Some(s.as_str()),_=>return reply_json(&mut stream,400,json!({"error":"map must be a name or null"}))};
+        let mut state=server.state.lock().map_err(|_|std::io::Error::other("poisoned state"))?;
+        if let Err(error)=state.set_manual_map(selected){return reply_json(&mut stream,400,json!({"error":error}));}
+        let snapshot=state.snapshot();
+        return reply_json(&mut stream,200,json!({"game_map":snapshot.game_map,"game_map_source":snapshot.game_map_source}));
     }
     // Only the authenticated CAS page can control the native Win32 window.
     // Application/json causes a cross-origin preflight; CORS is not enabled.

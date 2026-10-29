@@ -21,9 +21,10 @@ impl Schema {
     }
     pub fn offset(&self,name:&str)->Option<u64>{self.offsets.get(name).copied()}
     /// Overrides are process-local and only supplied by the verified PE resolver.
-    pub(crate) fn recover_player_offsets(&mut self,entity_list:u64,local_controller:u64){
+    pub(crate) fn recover_player_offsets(&mut self,entity_list:u64,local_controller:u64,additional:&[(&str,u64)]){
         self.offsets.insert("dwEntityList".into(),entity_list);
         self.offsets.insert("dwLocalPlayerController".into(),local_controller);
+        for (name,offset) in additional{self.offsets.insert((*name).into(),*offset);}
     }
     pub fn engine_offset(&self,name:&str)->Option<u64>{self.engine.get(name).copied()}
     pub fn field(&self, class:&str, name:&str)->Option<u64>{

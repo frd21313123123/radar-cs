@@ -39,9 +39,9 @@ fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Op
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
-pub struct CS2Reader {pub schema:Schema, layout:Layout, layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value}
+pub struct CS2Reader {pub schema:Schema, layout:Layout, layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
 impl CS2Reader {
-    pub fn new(schema:Schema)->Self{Self{schema,layout:Layout::new(0),layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({})}}
+    pub fn new(schema:Schema)->Self{Self{schema,layout:Layout::new(0),layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
     pub fn failure_diagnostics(&self)->serde_json::Value{self.failure_diagnostics.clone()}
     fn probe_layout<M:Memory>(&mut self,p:&mut M,list:u64,offset_addr:u64,local:u64){
         let now=Instant::now();
@@ -132,10 +132,27 @@ impl CS2Reader {
         (active_name,inventory,if has_c4{Some(true)}else if complete{Some(false)}else{None})
     }
 
+    fn controller_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
+        let controller=try_u64(p,base+self.schema.offset("dwLocalPlayerController")?).filter(|v|valid_pointer(*v))?;
+        let ticks=try_i32(p,controller+self.schema.field("CBasePlayerController","m_nTickBase")?)?;
+        if !(1..=64*60*60*24).contains(&ticks){return None;}
+        Some(ticks as f32/64.)
+    }
+    fn local_pawn_invalid<M:Memory>(&self,p:&mut M,base:u64)->bool{
+        let Some(offset)=self.schema.offset("dwLocalPlayerPawn") else{return false;};
+        let Some(pawn)=try_u64(p,base+offset) else{return true;};
+        // No local pawn is normal while spectating or changing teams.
+        if pawn==0{return false;}
+        if !valid_pointer(pawn){return true;}
+        let health=self.schema.field("C_BaseEntity","m_iHealth").and_then(|off|try_i32(p,pawn+off));
+        let node=self.schema.field("C_BaseEntity","m_pGameSceneNode").and_then(|off|try_u64(p,pawn+off));
+        !health.is_some_and(|hp|(0..=200).contains(&hp))||!node.is_some_and(valid_pointer)
+    }
     fn game_time<M:Memory>(&self,p:&mut M,base:u64)->Option<f32>{
-        let globals=p.u64(base+self.schema.offset("dwGlobalVars")?);
-        if globals<0x10000{return None;}
-        try_f32(p,globals+0x30).filter(|v|*v>=0.)
+        let current=self.schema.offset("dwGlobalVars")
+            .and_then(|offset|try_u64(p,base+offset)).filter(|v|valid_pointer(*v))
+            .and_then(|globals|try_f32(p,globals+0x30)).filter(|v|*v>0.&&*v<=86400.);
+        current.or_else(||self.controller_time(p,base))
     }
     fn flash_state<M:Memory>(&self,p:&mut M,pawn:u64)->Option<bool>{
         // Overlay alpha is the current effect, whereas FlashDuration can
@@ -157,29 +174,46 @@ impl CS2Reader {
         Some(value)
     }
 
-    /// Use Source 2 game-time rather than "40 seconds since detected".
-    /// GlobalVars.curtime is at +0x30 on the current CS2 client layout.
-    /// An invalid/missing clock leaves the indicator hidden instead of
-    /// showing an invented countdown.
-    fn planted_c4_timer<M:Memory>(&self,p:&mut M,base:u64)->Option<BombTimer>{
-        let ptr=p.u64(base+self.schema.offset("dwPlantedC4")?);
-        if ptr<0x10000{return None;}
+    fn active_planted<M:Memory>(&self,p:&mut M,ptr:u64)->bool{
+        if !valid_pointer(ptr){return false;}
         let field=|name:&str|self.schema.field("C_PlantedC4",name);
-        let ticking=field("m_bBombTicking").and_then(|o|try_u8(p,ptr+o))==Some(1);
-        if !ticking{return None;}
-        if field("m_bBombDefused").and_then(|o|try_u8(p,ptr+o))==Some(1)
-            || field("m_bHasExploded").and_then(|o|try_u8(p,ptr+o))==Some(1) {
-            return None;
+        if field("m_bBombTicking").and_then(|o|try_u8(p,ptr+o))!=Some(1){return false;}
+        if ["m_bBombDefused","m_bHasExploded"].iter().any(|name|
+            field(name).and_then(|o|try_u8(p,ptr+o))==Some(1)){return false;}
+        let blow=field("m_flC4Blow").and_then(|o|try_f32(p,ptr+o));
+        let total=field("m_flTimerLength").and_then(|o|try_f32(p,ptr+o));
+        blow.is_some_and(|v|v>0.)&&total.is_some_and(|v|(10.0..=180.0).contains(&v))
+    }
+    /// dwPlantedC4 can point at the one-element entity pointer container.
+    /// Try the supported direct/indirect layouts, accepting only one bomb
+    /// whose reflected ticking, expiry and lifetime fields validate.
+    fn planted_pointer<M:Memory>(&self,p:&mut M,base:u64)->Option<u64>{
+        let mut found=HashSet::new();
+        if let Some(first)=self.schema.offset("dwPlantedC4")
+            .and_then(|off|try_u64(p,base+off)).filter(|v|valid_pointer(*v)){
+            for ptr in [Some(first),try_u64(p,first)].into_iter().flatten(){
+                if self.active_planted(p,ptr){found.insert(ptr);}
+            }
         }
+        if found.len()==1{return found.into_iter().next();}
+        if found.is_empty(){return self.planted_entity.filter(|ptr|self.active_planted(p,*ptr));}
+        None
+    }
+    fn timer_for_planted<M:Memory>(&self,p:&mut M,base:u64,ptr:u64)->Option<BombTimer>{
+        if !self.active_planted(p,ptr){return None;}
+        let field=|name:&str|self.schema.field("C_PlantedC4",name);
         let blow=try_f32(p,ptr+field("m_flC4Blow")?)?;
         let total=try_f32(p,ptr+field("m_flTimerLength")?)?;
-        let gamevars=p.u64(base+self.schema.offset("dwGlobalVars")?);
-        if gamevars<0x10000{return None;}
-        // Read actual client game time. This field is not schema-reflected.
-        let current=try_f32(p,gamevars+0x30)?;
         let site=field("m_nBombSite").and_then(|o|try_i32(p,ptr+o)).unwrap_or(-1);
         let defusing=field("m_bBeingDefused").and_then(|o|try_u8(p,ptr+o))==Some(1);
-        BombTimer::from_game_time(site,blow,current,total,defusing)
+        // A real controller tick clock is useful when GlobalVars moved or
+        // is unreadable. Each clock must agree with the bomb's actual expiry.
+        [self.game_time(p,base),self.controller_time(p,base)].into_iter().flatten()
+            .find_map(|current|BombTimer::from_game_time(site,blow,current,total,defusing))
+    }
+    fn planted_c4_timer<M:Memory>(&self,p:&mut M,base:u64)->Option<BombTimer>{
+        let ptr=self.planted_pointer(p,base)?;
+        self.timer_for_planted(p,base,ptr)
     }
     /// Locate C4 by the global pointer AND the entity list: the global
     /// pointer alone may represent only the local player's equipped C4.
@@ -229,6 +263,8 @@ impl CS2Reader {
         let mut dropped:Option<BombWorld>=None;
         let mut ownerless=false;
         let mut checked=0;
+        let mut planted=HashSet::new();
+        if let Some(ptr)=self.planted_pointer(p,base){planted.insert(ptr);}
         for ptr in candidates {
             let identified=self.item(p,ptr).is_some_and(|(id,_)|id==49);
             // Item metadata can be absent for a dropped C4; identify the
@@ -240,6 +276,7 @@ impl CS2Reader {
                     if name_ptr>=0x10000{p.cstr(name_ptr,48).to_ascii_lowercase()}else{String::new()}
                 }else{String::new()}
             };
+            if matches!(entity_name.as_str(),"planted_c4"|"c_plantedc4"|"c_planted_c4")&&self.active_planted(p,ptr){planted.insert(ptr);}
             let is_c4=identified || matches!(entity_name.as_str(),
                 "weapon_c4"|"c_c4"|"c4"|"c_weapon_c4");
             if !is_c4 {continue;}
@@ -271,22 +308,14 @@ impl CS2Reader {
                 dropped=Some(BombWorld{position,status:"dropped".into(),source:"entity".into()});
             }
         }
-        // A planted bomb is a separate entity; it must not be shown as "dropped".
-        if let Some(offset)=self.schema.offset("dwPlantedC4"){
-            let ptr=p.u64(base+offset);
-            let active=self.schema.field("C_PlantedC4","m_bBombTicking")
-                .and_then(|o|p.read(ptr+o,1))
-                .and_then(|raw|raw.first().copied())
-                .is_some_and(|b|b==1);
-            if ptr!=0 && active {
-                let pos=scene.and_then(|o|{let node=p.u64(ptr+o);
-                    if node!=0 {origin.and_then(|vo|p.vec3(node+vo))}else{None}})
-                    .filter(|v|*v!=[0.,0.,0.]);
-                if let Some(position)=pos {
-                    return (None,Some(BombWorld{position,status:"planted".into(),source:"planted_entity".into()}),true,checked);
-                }
-                return (None,None,true,checked);
-            }
+        // Use the same validated entity for both world marker and timer.
+        // Ambiguous live planted entities do not create an invented marker.
+        self.planted_entity=if planted.len()==1{planted.into_iter().next()}else{None};
+        if let Some(ptr)=self.planted_entity{
+            let pos=scene.and_then(|o|try_u64(p,ptr+o)).filter(|node|valid_pointer(*node))
+                .and_then(|node|origin.and_then(|vo|p.vec3(node+vo))).filter(|v|*v!=[0.,0.,0.]);
+            let world=pos.map(|position|BombWorld{position,status:"planted".into(),source:"planted_entity".into()});
+            return (None,world,true,checked);
         }
         if carried.is_some(){(carried,None,false,checked)}
         else {(None,dropped,ownerless,checked)}
@@ -478,9 +507,18 @@ impl CS2Reader {
         None
     }
     pub fn current_map<M:Memory>(&self,p:&mut M,base:u64)->Option<String>{
-        let off=self.schema.offset("dwGlobalVars")?;let ptr=p.u64(base+off);if ptr==0{return None;}
-        let strptr=p.u64(ptr+0x180);if strptr==0{return None;}
-        let map=p.cstr(strptr,96);normalize_map_name(&map)
+        let off=self.schema.offset("dwGlobalVars")?;
+        let ptr=try_u64(p,base+off).filter(|v|valid_pointer(*v))?;
+        // Official cs2-dumper GlobalVars map-name slot, not a scan of
+        // arbitrary strings that might pick a previously loaded map.
+        let strptr=try_u64(p,ptr+0x180).filter(|v|valid_pointer(*v))?;
+        let mut bytes=Vec::new();
+        for at in 0..96u64{
+            let byte=try_u8(p,strptr+at)?;
+            if byte==0{return std::str::from_utf8(&bytes).ok().and_then(normalize_map_name);}
+            bytes.push(byte);
+        }
+        None
     }
     pub fn snapshot<M:Memory>(&mut self,p:&mut M,base:u64,engine:u64,pid:u32,details:bool,grenade_scan:bool)->Result<Snapshot,String>{
         let start=Instant::now();self.chunk_cache.clear();
@@ -500,11 +538,16 @@ impl CS2Reader {
         let read_error=if read.is_none(){p.last_error()}else{0};
         diag.set("entity_list_initial_read_ok",json!(read.is_some()));
         diag.set("entity_list_initial_win32_error",json!(read_error));
-        if !read.is_some_and(valid_pointer) && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
+        let secondary_unavailable=read.is_some_and(valid_pointer)&&
+            ((self.game_time(p,base).is_none()&&self.current_map(p,base).is_none())||self.local_pawn_invalid(p,base));
+        if (!read.is_some_and(valid_pointer)||secondary_unavailable)
+            && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
             self.recovery_at=Some(Instant::now());
             diag.set("runtime_recovery_attempted",json!(true));
+            diag.set("runtime_recovery_reason",json!(if secondary_unavailable{"secondary_globals"}else{"entity_list"}));
             if let Some(recovered)=crate::resolver::recover_player_globals(p,base){
-                self.schema.recover_player_offsets(recovered.entity_list_offset,recovered.local_controller_offset);
+                self.schema.recover_player_offsets(recovered.entity_list_offset,recovered.local_controller_offset,&recovered.additional_offsets);
+                diag.set("runtime_recovered_globals",json!(recovered.additional_offsets.iter().map(|(name,_)|*name).collect::<Vec<_>>()));
                 self.layout=Layout::new(0);self.layout_at=None;self.chunk_cache.clear();
                 self.runtime_offsets=true;
                 read=try_u64(p,base+recovered.entity_list_offset);
@@ -530,8 +573,10 @@ impl CS2Reader {
         let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
         let current_time=self.game_time(p,base);
-        let bomb_timer=self.planted_c4_timer(p,base);
+        let mut bomb_timer=self.planted_c4_timer(p,base);
         diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
+        diag.set("game_time_available",json!(current_time.is_some()));
+        diag.set("map_memory_available",json!(self.current_map(p,base).is_some()));
         diag.set("local_controller_found",json!(if local!=0 {1}else{0}));
         diag.set("local_pawn_found",json!(if local_pawn!=0 {1}else{0}));
         self.probe_layout(p,list,base+list_off,local);self.chunk_cache.clear();
@@ -648,6 +693,8 @@ impl CS2Reader {
         if details {
             let (owner,world,ownerless,scanned)=self.scan_c4(p,list,base,&pawns);
             global_owner=owner;bomb_world=world;unowned=ownerless;
+            bomb_timer=self.planted_c4_timer(p,base);
+            diag.set("bomb_timer_available",json!(bomb_timer.is_some()));
             diag.set("c4_entities_scanned",json!(scanned));
             diag.set("c4_world_found",json!(bomb_world.is_some()));
             diag.set("c4_on_ground",json!(bomb_world.as_ref().is_some_and(|b|b.status=="dropped")));
@@ -678,7 +725,7 @@ impl CS2Reader {
         diag.set("read_attempts",json!(p.read_count()-before_read));diag.set("read_failures",json!(p.fail_count()-before_fail));
         diag.set("last_win32_error",json!(p.last_error()));diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
-        let build=if engine!=0{self.schema.engine_offset("dwBuildNumber").map(|o|p.u32(engine+o))}else{None};
+        let build=if engine!=0{self.schema.engine_offset("dwBuildNumber").and_then(|o|try_i32(p,engine+o)).filter(|b|*b>0)}else{None};
         diag.set("game_build",json!(build));
         let same=build.and_then(|b|self.schema.info["build_number"].as_u64().map(|v|v==b as u64));
         diag.set("offsets_match_game",json!(same));
@@ -722,7 +769,7 @@ mod bomb_read_tests {
     fn reader() -> CS2Reader {
         let offsets=json!({"client.dll":{
             "dwEntityList":8,"dwLocalPlayerController":16,"dwWeaponC4":24,
-            "dwGameEntitySystem":32,"dwGameEntitySystem_highestEntityIndex":64
+            "dwGameEntitySystem":32,"dwGameEntitySystem_highestEntityIndex":64,"dwGlobalVars":40,"dwPlantedC4":48
         }});
         let client=json!({"client.dll":{"classes":{
             "CCSPlayerController":{"fields":{"m_hPlayerPawn":4}},
@@ -735,7 +782,10 @@ mod bomb_read_tests {
             "C_EconItemView":{"fields":{"m_iItemDefinitionIndex":4}},
             "C_CSPlayerPawnBase":{"fields":{"m_flFlashOverlayAlpha":96}},
             "CSkeletonInstance":{"fields":{"m_modelState":128}},
-            "CModelState":{"fields":{"m_ModelName":32}}
+            "CModelState":{"fields":{"m_ModelName":32}},
+            "CBasePlayerController":{"fields":{"m_nTickBase":256}},
+            "C_PlantedC4":{"fields":{"m_bBombTicking":256,"m_flC4Blow":260,"m_flTimerLength":264,
+                "m_nBombSite":268,"m_bBombDefused":272,"m_bHasExploded":273,"m_bBeingDefused":274}}
         }}});
         CS2Reader::new(Schema::from_json(&offsets,&client,json!({})).unwrap())
     }
@@ -745,6 +795,65 @@ mod bomb_read_tests {
         // Include empty entries so the production bulk-read path is exercised.
         p.put(block,&vec![0;512*0x78]);
         p.put(block+(index&511) as u64*0x78,&ptr.to_le_bytes());
+    }
+    fn planted_fixture(indirect:bool)->(CS2Reader,FakeMemory){
+        let r=reader();let mut p=FakeMemory::new();let base=0x70000;
+        p.put(base+40,&0x80000u64.to_le_bytes());p.put(0x80030,&100f32.to_le_bytes());
+        p.put(base+48,&(if indirect{0xa0000u64}else{0xb0000}).to_le_bytes());
+        p.put(0xa0000,&0xb0000u64.to_le_bytes());
+        p.put(0xb0100,&[1]);p.put(0xb0104,&125f32.to_le_bytes());p.put(0xb0108,&40f32.to_le_bytes());
+        p.put(0xb010c,&1i32.to_le_bytes());p.put(0xb0110,&[0,0,1]);
+        p.put(0xb0000+48,&0xd0000u64.to_le_bytes());
+        let xyz:Vec<u8>=[120f32,240.,16.].iter().flat_map(|x|x.to_le_bytes()).collect();p.put(0xd0010,&xyz);
+        (r,p)
+    }
+    #[test]fn planted_pointer_indirection_drives_both_timer_and_world_marker(){
+        for indirect in [false,true]{
+            let (mut r,mut p)=planted_fixture(indirect);
+            let timer=r.planted_c4_timer(&mut p,0x70000).unwrap();
+            assert_eq!(timer.remaining_secs,25.);assert_eq!(timer.site.as_deref(),Some("B"));assert!(timer.being_defused);
+            let (_,world,unowned,_)=r.scan_c4(&mut p,0x20000,0x70000,&BTreeMap::new());
+            let world=world.unwrap();assert!(unowned);assert_eq!(world.status,"planted");assert_eq!(world.position,[120.,240.,16.]);
+            p.put(0xb0110,&[1]);
+            assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+            assert!(r.scan_c4(&mut p,0x20000,0x70000,&BTreeMap::new()).1.is_none());
+        }
+    }
+    #[test]fn planted_timer_falls_back_to_real_controller_tick_clock(){
+        let (r,mut p)=planted_fixture(true);
+        // A stale GlobalVars value must not force a fabricated countdown.
+        p.put(0x80030,&20f32.to_le_bytes());
+        p.put(0x70000+16,&0x90000u64.to_le_bytes());p.put(0x90100,&6400i32.to_le_bytes());
+        assert_eq!(r.planted_c4_timer(&mut p,0x70000).unwrap().remaining_secs,25.);
+        p.put(0x90100,&0i32.to_le_bytes());assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+    }
+    #[test]fn planted_entity_scan_recovers_timer_when_global_pointer_is_unavailable(){
+        let (mut r,mut p)=planted_fixture(true);p.put(0x70000+48,&0u64.to_le_bytes());
+        put_entity(&mut p,100,0xb0000);
+        p.put(0xb0010,&0xc0000u64.to_le_bytes());p.put(0xc0020,&0xe0000u64.to_le_bytes());
+        let mut name=[0u8;48];name[..10].copy_from_slice(b"planted_c4");p.put(0xe0000,&name);
+        assert!(r.planted_c4_timer(&mut p,0x70000).is_none());
+        assert_eq!(r.scan_c4(&mut p,0x20000,0x70000,&BTreeMap::new()).1.unwrap().status,"planted");
+        assert_eq!(r.planted_c4_timer(&mut p,0x70000).unwrap().remaining_secs,25.);
+    }
+    #[test]fn current_map_reads_only_the_validated_global_slot_and_short_string(){
+        let (r,mut p)=planted_fixture(true);
+        p.put(0x80180,&0xf0000u64.to_le_bytes());
+        // Only the string bytes are readable (e.g. end of a memory page).
+        p.put(0xf0000,b"maps/de_nuke.vpk\0");assert_eq!(r.current_map(&mut p,0x70000).as_deref(),Some("de_nuke"));
+        p.put(0xf0000,b"bad/../../passwd\0");assert!(r.current_map(&mut p,0x70000).is_none());
+        p.put(0x80180,&0u64.to_le_bytes());assert!(r.current_map(&mut p,0x70000).is_none());
+    }
+
+    #[test]fn missing_secondary_globals_trigger_throttled_recovery_with_valid_entity_list(){
+        let mut r=reader();let mut p=FakeMemory::new();
+        p.put(0x70000+8,&0x20000u64.to_le_bytes());p.put(0x70000+16,&0u64.to_le_bytes());
+        let first=r.snapshot(&mut p,0x70000,0,123,false,false).unwrap();
+        assert_eq!(first.diagnostics["entity_list_read_ok"],true);
+        assert_eq!(first.diagnostics["runtime_recovery_attempted"],true);
+        assert_eq!(first.diagnostics["runtime_recovery_reason"],"secondary_globals");
+        let next=r.snapshot(&mut p,0x70000,0,123,false,false).unwrap();
+        assert!(next.diagnostics.get("runtime_recovery_attempted").is_none());
     }
     #[test]
     fn entity_list_failures_retain_diagnostics_and_distinguish_null_from_unreadable(){

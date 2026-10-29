@@ -36,6 +36,9 @@ jobs:
         run: cargo test --target x86_64-pc-windows-msvc --all-targets
       - name: Build release EXE
         run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Smoke test Windows app and native mini radar
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1
       - name: Package ready-to-run release
         shell: pwsh
         run: |

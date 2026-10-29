@@ -51,17 +51,22 @@ fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,c
                 let reader=reader.as_mut().ok_or("No valid offsets; start once online or provide cache JSON")?;
                 if last_scan.elapsed()>Duration::from_secs(5)||proc.pid==0{
                     last_scan=Instant::now();
-                    if !proc.connect()?{return Ok(Snapshot::status("waiting","cs2.exe not found"));}
+                    if !proc.connect()?{
+                        tracker.reset();grenade_tracker.reset();noise_tracker.reset();cache_grenades.clear();cache_details.clear();
+                        if let Ok(mut s)=state.lock(){s.clear_automatic_map();}
+                        return Ok(Snapshot::status("waiting","cs2.exe not found"));
+                    }
                 }
                 let base=proc.module("client.dll");let engine=proc.module("engine2.dll");
                 if base==0{return Err("client.dll not loaded".into());}
+                let rich=last_detail.elapsed()>=Duration::from_millis(280);
+                let grenade_scan=last_grenade_scan.elapsed()>=Duration::from_millis(90);
+                let pid=proc.pid;let mut snap=reader.snapshot(&mut proc,base,engine,pid,rich,grenade_scan)?;
+                // Snapshot may have recovered GlobalVars; read the map after it.
                 if last_map.elapsed()>=Duration::from_secs(1){
                     last_map=Instant::now();
                     if let Some(map)=reader.current_map(&mut proc,base){if let Ok(mut s)=state.lock(){s.set_map(&map,"memory");}}
                 }
-                let rich=last_detail.elapsed()>=Duration::from_millis(280);
-                let grenade_scan=last_grenade_scan.elapsed()>=Duration::from_millis(90);
-                let pid=proc.pid;let mut snap=reader.snapshot(&mut proc,base,engine,pid,rich,grenade_scan)?;
                 if grenade_scan{last_grenade_scan=Instant::now();}
                 if rich{
                     cache_details=snap.players.iter().map(|p|(p.id,p.clone())).collect();last_detail=Instant::now();

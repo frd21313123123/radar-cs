@@ -41,6 +41,27 @@ pub fn marker_point(point:(f32,f32),width:f32,height:f32,angle:f32)->Option<(f32
 }
 
 
+/// Metadata is required for both the background and all world projections.
+/// An unknown map must not silently reuse another map's coordinates.
+#[cfg(any(windows,test))]
+fn map_overview(info:&Value)->Option<(f32,f32,f32)> {
+    let x=info.get("pos_x")?.as_f64()? as f32;
+    let y=info.get("pos_y")?.as_f64()? as f32;
+    let scale=info.get("scale")?.as_f64()? as f32;
+    if [x,y,scale].iter().all(|v|v.is_finite())&&scale>0. {Some((x,y,scale))}else{None}
+}
+
+
+/// Advance a validated game-time countdown using the age of its snapshot.
+/// A stale snapshot must expire instead of freezing after a short age cap.
+#[cfg(any(windows,test))]
+fn countdown_remaining(remaining:f32,snapshot_time:f64,now:f64)->Option<f32>{
+    if !remaining.is_finite()||remaining<=0.||!snapshot_time.is_finite()||!now.is_finite(){return None;}
+    let value=remaining as f64-(now-snapshot_time).max(0.);
+    if value.is_finite()&&value>0.{Some(value as f32)}else{None}
+}
+
+
 /// A map name may arrive through GSI before any pawn data is readable. Only
 /// report player readiness from the reader snapshot, never from map metadata.
 #[cfg(any(windows,test))]
@@ -154,7 +175,9 @@ impl OverlayController {
         let settings=self.settings.lock().map(|s|s.clone()).unwrap_or_default();
         #[cfg(windows)] let window_ready=self.inner.hwnd.load(std::sync::atomic::Ordering::Acquire)!=0;
         #[cfg(not(windows))] let window_ready=false;
-        json!({"supported":self.supported(),"window_ready":window_ready,"settings":settings})
+        #[cfg(windows)] let map_ready=self.inner.map_ready.load(std::sync::atomic::Ordering::Acquire);
+        #[cfg(not(windows))] let map_ready=false;
+        json!({"supported":self.supported(),"window_ready":window_ready,"map_ready":map_ready,"settings":settings})
     }
     pub fn update(&self,v:&Value)->Result<Value,String>{
         #[cfg(not(windows))]{let _=v;return Err("Native overlay requires Windows".into());}
@@ -173,7 +196,7 @@ mod win {
     use super::*;
     use crate::assets;
     use serde_json::Value;
-    use std::{cell::RefCell,ffi::c_void,ptr::{null,null_mut},sync::{OnceLock,atomic::{AtomicIsize,Ordering}},thread,time::{Duration,Instant}};
+    use std::{cell::RefCell,ffi::c_void,ptr::{null,null_mut},sync::{OnceLock,atomic::{AtomicIsize,AtomicU64,AtomicBool,Ordering}},thread,time::{Duration,Instant}};
     type HWND=*mut c_void;
     type HDC=*mut c_void;
     const WM_CLOSE:u32=0x10;const WM_DESTROY:u32=0x02;const WM_PAINT:u32=0x0F;const WM_ERASEBKGND:u32=0x14;const WM_GETMINMAXINFO:u32=0x24;
@@ -274,12 +297,21 @@ mod win {
     thread_local! {static BOMB_ICON:RefCell<Option<*mut c_void>>=RefCell::new(None);}
     thread_local! {static CACHE:RefCell<NativeMap>=RefCell::new(NativeMap::default());
         static LAST_MAP_CHECK:RefCell<Option<Instant>>=const{RefCell::new(None)};}
-    struct NativeMap {image:*mut c_void,name:String,last_try:Option<Instant>}
-    impl Default for NativeMap {fn default()->Self{Self{image:null_mut(),name:String::new(),last_try:None}}}
-    pub struct WindowBridge {pub settings:Arc<Mutex<OverlaySettings>>,pub state:Arc<Mutex<SharedState>>,pub cache:std::path::PathBuf,pub offline:bool,pub hwnd:AtomicIsize}
+    struct PendingMap {key:String,receiver:std::sync::mpsc::Receiver<Result<std::path::PathBuf,&'static str>>}
+    struct NativeMap {
+        image:*mut c_void,key:String,path:Option<std::path::PathBuf>,
+        pending:Option<PendingMap>,last_requested:String,last_try:Option<Instant>,error:Option<&'static str>,
+    }
+    impl Default for NativeMap {fn default()->Self{Self{image:null_mut(),key:String::new(),path:None,
+        pending:None,last_requested:String::new(),last_try:None,error:None}}}
+    static MAP_REQUEST_ID:AtomicU64=AtomicU64::new(0);
+    fn map_key(name:&str,layer:&str,maps:&Value)->String{
+        format!("{name}/{layer}/{}",maps["maps"][name]["radar_paths"])
+    }
+    pub struct WindowBridge {pub settings:Arc<Mutex<OverlaySettings>>,pub state:Arc<Mutex<SharedState>>,pub cache:std::path::PathBuf,pub offline:bool,pub hwnd:AtomicIsize,pub map_ready:AtomicBool}
     impl WindowBridge {
         pub fn launch(settings:Arc<Mutex<OverlaySettings>>,state:Arc<Mutex<SharedState>>,cache:std::path::PathBuf,offline:bool)->Arc<Self>{
-            let bridge=Arc::new(Self{settings,state,cache,offline,hwnd:AtomicIsize::new(0)});
+            let bridge=Arc::new(Self{settings,state,cache,offline,hwnd:AtomicIsize::new(0),map_ready:AtomicBool::new(false)});
             let _=GLOBAL.set(bridge.clone());
             thread::spawn(move||unsafe{run();});
             bridge
@@ -299,22 +331,58 @@ mod win {
         unsafe{let b=brush(g,color);if !b.is_null(){GdipFillPolygonI(g,b,points.as_ptr(),3,0);GdipDeleteBrush(b);}}
     }
     fn argb(hex:&str)->u32 {let rgb=u32::from_str_radix(hex.strip_prefix('#').unwrap_or("3b82f6"),16).unwrap_or(0x3b82f6);0xff000000|rgb}
-    unsafe fn load_map(bridge:&WindowBridge,name:&str,maps:&Value){
-        CACHE.with(|cache|{let mut map=cache.borrow_mut();if map.name==name {return;}
-            if map.last_try.map(|t|t.elapsed()<Duration::from_secs(3)).unwrap_or(false){return;}
-            map.last_try=Some(Instant::now());
-            // Map art remains an ordinary cached Valve overview PNG, decoded
-            // by Windows GDI+, not an embedded browser or WebView.
-            if let Ok(bytes)=assets::map_image(name,"default",maps,&bridge.cache,bridge.offline){
-                let path=bridge.cache.join(format!("native_{name}.png"));
-                if std::fs::write(&path,bytes).is_ok(){
-                    let mut loaded=null_mut();
-                    if GdipLoadImageFromFile(wide(&path.to_string_lossy()).as_ptr(),&mut loaded)==0 {
-                        if !map.image.is_null(){GdipDisposeImage(map.image);}
-                        map.image=loaded;map.name=name.into();
+    /// Download off the window's message thread. GDI+ decoding stays on the
+    /// UI thread, and completions are accepted only for the current map/layer.
+    unsafe fn load_map(bridge:&WindowBridge,name:&str,layer:&str,maps:&Value){
+        let wanted=map_key(name,layer,maps);
+        CACHE.with(|cache|{
+            let mut map=cache.borrow_mut();
+            if let Some(pending)=map.pending.take(){
+                match pending.receiver.try_recv(){
+                    Ok(result)=>{
+                        if pending.key==wanted{
+                            match result{
+                                Ok(path)=>{
+                                    let mut image=null_mut();
+                                    if GdipLoadImageFromFile(wide(&path.to_string_lossy()).as_ptr(),&mut image)==0&&!image.is_null(){
+                                        if !map.image.is_null(){GdipDisposeImage(map.image);}
+                                        if let Some(old)=map.path.take(){let _=std::fs::remove_file(old);}
+                                        map.image=image;map.key=wanted.clone();map.path=Some(path);map.error=None;
+                                    }else{
+                                        if !image.is_null(){GdipDisposeImage(image);}
+                                        let _=std::fs::remove_file(path);map.error=Some("Не удалось открыть PNG карты");
+                                    }
+                                }
+                                Err(reason)=>map.error=Some(reason),
+                            }
+                        }else if let Ok(path)=result{let _=std::fs::remove_file(path);}
                     }
+                    Err(std::sync::mpsc::TryRecvError::Empty)=>{
+                        if pending.key==wanted{map.pending=Some(pending);return;}
+                        // Dropping the old receiver makes its worker remove
+                        // the temporary file instead of publishing stale art.
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>map.error=Some("Загрузка фона карты прервалась"),
                 }
             }
+            if map.key==wanted&&!map.image.is_null(){return;}
+            if map.last_requested==wanted&&map.last_try.is_some_and(|t|t.elapsed()<Duration::from_secs(10)){return;}
+            map.last_requested=wanted.clone();map.last_try=Some(Instant::now());map.error=None;
+            let (sender,receiver)=std::sync::mpsc::channel();
+            let (name,layer,maps,cache,offline)=(name.to_owned(),layer.to_owned(),maps.clone(),bridge.cache.clone(),bridge.offline);
+            let id=MAP_REQUEST_ID.fetch_add(1,Ordering::Relaxed);
+            map.pending=Some(PendingMap{key:wanted,receiver});
+            thread::spawn(move||{
+                let result=assets::map_image(&name,&layer,&maps,&cache,offline)
+                    .map_err(|_|if offline{"Фон карты не сохранён для офлайн-режима"}else{"Не удалось скачать фон карты"})
+                    .and_then(|bytes|{
+                        // GDI+ keeps decoded source files open on Windows:
+                        // unique paths avoid overwriting a still-open image.
+                        let path=cache.join(format!("native_{name}_{layer}_{id}.png"));
+                        std::fs::write(&path,bytes).map(|_|path).map_err(|_|"Не удалось сохранить фон карты")
+                    });
+                if let Err(error)=sender.send(result){if let Ok(path)=error.0{let _=std::fs::remove_file(path);}}
+            });
         });
     }
     /// Vector badge: rendered under GDI+ world transform, staying attached to
@@ -425,19 +493,22 @@ mod win {
         }
     }
     fn overlay_frame(g:*mut c_void,dc:HDC,width:i32,height:i32,bridge:&WindowBridge){
+        // Readiness means the currently selected map/layer has actually been
+        // decoded and drawn, not just that its download was scheduled.
+        bridge.map_ready.store(false,Ordering::Release);
         LABELS.with(|labels|labels.borrow_mut().clear());
-        let snap=bridge.state.lock().ok().map(|st|st.snapshot());
-        let (snap,mapdata,game_map)=if let Some(s)=snap {
-            let st=bridge.state.lock().ok();let map=s.game_map.clone();let data=st.as_ref().map(|x|x.maps["maps"][&map]["radar_info"].clone()).unwrap_or(Value::Null);
-            (s,data,map)
-        }else{return};
+        let data=bridge.state.lock().ok().map(|st|(st.snapshot(),st.maps.clone()));
+        let (snap,maps)=match data{Some(data)=>data,None=>return};
+        let game_map=snap.game_map.clone();
+        let mapdata=&maps["maps"][&game_map]["radar_info"];
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
         unsafe{GdipGraphicsClear(g,0xff10171d);}
-        let pos_x=mapdata["pos_x"].as_f64().unwrap_or(-3230.) as f32;
-        let pos_y=mapdata["pos_y"].as_f64().unwrap_or(1713.) as f32;
-        let scale=mapdata["scale"].as_f64().unwrap_or(5.) as f32;
         let local=snap.players.iter().find(|p|p.local&&p.life_state=="alive");
         let focus=snap.radar_focus(cfg.follow_spectator);
+        let layer=assets::map_layer_for_height(mapdata,focus.as_ref().map(|p|p.position[2]));
+        let mut background_notice=if game_map.is_empty(){Some("Карта не определена. Выберите её на основной карте.")}
+            else{Some("Нет координат карты. Проверьте выбранную карту.")};
+        if let Some((pos_x,pos_y,scale))=map_overview(mapdata){
         // On spectator target changes, immediately adopt the new camera
         // orientation instead of smoothing from the previous player's yaw.
         let focus_id=focus.as_ref().map(|p|(p.spectating,p.entity_id));
@@ -463,9 +534,15 @@ mod win {
         let side=(width.min(height)-12).max(1) as f32*cfg.zoom;
         let (left,top)=screen_point([pos_x,pos_y,0.],(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center)
             .unwrap_or((0.,0.));
-        CACHE.with(|image|{let map=image.borrow();if !map.image.is_null()&&map.name==game_map {
-            unsafe{GdipDrawImageRectI(g,map.image,left as i32,top as i32,side as i32,side as i32);}
-        }});
+        let wanted=map_key(&game_map,&layer,&maps);
+        background_notice=CACHE.with(|image|{
+            let map=image.borrow();
+            if !map.image.is_null()&&map.key==wanted {
+                let ok=unsafe{GdipDrawImageRectI(g,map.image,left as i32,top as i32,side as i32,side as i32)}==0;
+                if ok{bridge.map_ready.store(true,Ordering::Release);None}else{Some("Не удалось нарисовать фон карты")}
+            }else if map.last_requested==wanted{Some(map.error.unwrap_or("Фон карты загружается…"))}
+            else{Some("Фон карты загружается…")}
+        });
         if cfg.show_noise {
             if let (Some(me),Some(noise))=(local,snap.noise.as_ref()){
                 if let Some((x,y))=screen_point(me.position,(pos_x,pos_y,scale),
@@ -600,26 +677,26 @@ mod win {
                 label(x,y+45.,p.weapon.clone(),0xffd9e8f1);
             }
         }
+        } // Valid overview: unknown maps never use another map's geometry.
         // Custom chrome is drawn last and never rotates with the map.
         rectangle(g,0,0,width,34,0xf5101822);
         rectangle(g,width-40,4,34,30,0xff34232c);
         segments(g,&[(width-29,13,width-17,25),(width-17,13,width-29,25)],0xffffdce3,2.);
         let bomb_lines=if cfg.show_bomb_timer{
             snap.bomb_timer.as_ref().and_then(|timer|{
-                let age=(crate::model::now_secs()-snap.time).clamp(0.0,1.5) as f32;
-                let remaining=(timer.remaining_secs-age).max(0.0);
-                if remaining<=0.0 {return None;}
+                let remaining=countdown_remaining(timer.remaining_secs,snap.time,crate::model::now_secs())?;
                 draw_bomb_panel(g,remaining,timer.total_secs);
                 Some([format!("Плэнт: {}",timer.site.as_deref().unwrap_or("?")),
                     format!("{remaining:.1} сек")])
             })
         }else{None};
+        let has_bomb_timer=bomb_lines.is_some();
         BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
         let no_player_data=reader_notice(&snap.status,snap.players.len(),snap.message.as_deref(),((width-48)/8).max(16) as usize);
-        if let Some(lines)=no_player_data.as_ref(){
+        if let Some(lines)=no_player_data.as_ref().filter(|_|!has_bomb_timer){
             // Below the drag strip/X, visible even when GSI already names a map.
-            // Render after world content; omit stale bomb text in this panel.
-            BOMB_LINES.with(|s|*s.borrow_mut()=None);
+            // An independently validated C4 clock keeps this area when player
+            // records are unavailable; the header still reports missing data.
             LABELS.with(|s|s.borrow_mut().clear());
             let panel_height=24+lines.len() as i32*19;
             rectangle(g,10,45,width-20,panel_height,0xf518222d);
@@ -628,8 +705,28 @@ mod win {
                 label(width as f32/2.,(56+i as i32*19) as f32,line.clone(),if i==0{0xffffd7a1}else{0xffdbe7ef});
             }
         }
+        if let Some(notice)=background_notice{
+            rectangle(g,6,height-48,width-12,43,0xee18222d);
+            let title=if notice.contains("загружается"){"Загрузка фона карты…"}
+                else if game_map.is_empty(){"Карта не определена"}else{"Фон карты недоступен"};
+            label(width as f32/2.,(height-45) as f32,title.into(),0xffffd7a1);
+            // Short, safe local explanations; never echo remote URLs/errors.
+            let (first,second)=notice.split_once(". ").unwrap_or((notice,""));
+            let concise=if second.is_empty(){first}else{second};
+            label(width as f32/2.,(height-26) as f32,concise.to_owned(),0xffdbe7ef);
+        }
+        if has_bomb_timer&&background_notice.is_none(){
+            if let Some(lines)=no_player_data.as_ref(){
+                // Keep the validated clock above and a concise reader cause
+                // below it, including at the minimum 295x205 window size.
+                rectangle(g,6,height-48,width-12,43,0xee18222d);
+                for (i,line) in lines.iter().skip(1).take(2).enumerate(){
+                    label(width as f32/2.,(height-45+i as i32*19) as f32,line.clone(),0xffffd7a1);
+                }
+            }
+        }
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
-        let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {}",game_map.to_uppercase())};
+        let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {} / {}",game_map.to_uppercase(),if layer=="lower"{"НИЖНИЙ"}else{"ВЕРХНИЙ"})};
         if cfg.follow_spectator {
             if let Some(target)=focus.as_ref().filter(|p|p.spectating){
                 let short:String=target.name.chars().take(12).collect();
@@ -687,8 +784,12 @@ mod win {
                             let mut t=last.borrow_mut();if t.map(|v|v.elapsed()>Duration::from_millis(400)).unwrap_or(true){*t=Some(Instant::now());true}else{false}
                         });
                         if should_check {
-                            let (map,maps)=bridge.state.lock().ok().map(|s|(s.current_map().to_owned(),s.maps.clone())).unwrap_or_default();
-                            if !map.is_empty(){load_map(bridge,&map,&maps);}
+                            let follow=bridge.settings.lock().map(|s|s.follow_spectator).unwrap_or(true);
+                            let (snap,maps)=bridge.state.lock().ok().map(|s|(s.snapshot(),s.maps.clone())).unwrap_or_else(||(crate::model::Snapshot::status("error",""),Value::Null));
+                            let map=&snap.game_map;
+                            let info=&maps["maps"][map]["radar_info"];
+                            let layer=assets::map_layer_for_height(info,snap.radar_focus(follow).map(|p|p.position[2]));
+                            if !map.is_empty()&&map_overview(info).is_some(){load_map(bridge,map,&layer,&maps);}
                         }
                         InvalidateRect(hwnd,null(),0);
                     }
@@ -809,7 +910,8 @@ mod win {
         // Initially hidden; browser exposes Open Mini Radar settings to show it.
         update_window(hwnd);
         let mut msg=Msg::default();while GetMessageW(&mut msg,null_mut(),0,0)>0{TranslateMessage(&msg);DispatchMessageW(&msg);}
-        CACHE.with(|c|{let mut map=c.borrow_mut();if !map.image.is_null(){GdipDisposeImage(map.image);map.image=null_mut();}});
+        CACHE.with(|c|{let mut map=c.borrow_mut();if !map.image.is_null(){GdipDisposeImage(map.image);map.image=null_mut();}
+            if let Some(path)=map.path.take(){let _=std::fs::remove_file(path);}});
         GdiplusShutdown(gdip);
     }
 }
@@ -837,6 +939,35 @@ mod win {
         assert!(!unknown.contains("https:")&&!unknown.contains("secret"));
         let missing=reader_notice("waiting",0,Some("cs2.exe not found"),30).unwrap().join(" ");
         assert!(missing.contains("CS2 не запущена"));
+    }
+    #[test]fn unknown_overview_has_no_fabricated_mirage_projection(){
+        assert!(map_overview(&Value::Null).is_none());
+        assert!(map_overview(&json!({"pos_x":-3230,"pos_y":1713})).is_none());
+        assert!(map_overview(&json!({"pos_x":0,"pos_y":0,"scale":0})).is_none());
+        assert!(map_overview(&json!({"pos_x":0,"pos_y":0,"scale":-7})).is_none());
+        assert!(map_overview(&json!({"pos_x":0,"pos_y":0,"scale":1e100})).is_none());
+        assert_eq!(map_overview(&json!({"pos_x":0,"pos_y":0,"scale":5})),Some((0.,0.,5.)));
+    }
+    #[test]fn nuke_layers_share_their_actual_overview_projection(){
+        let maps=crate::assets::fallback_maps();let info=&maps["maps"]["de_nuke"]["radar_info"];
+        let overview=map_overview(info).unwrap();assert_eq!(overview,(-3453.,2887.,7.));
+        assert_eq!(crate::assets::map_layer_for_height(info,Some(-494.)),"default");
+        assert_eq!(crate::assets::map_layer_for_height(info,Some(-496.)),"lower");
+        // Top-left PNG pixel and focus use the very same overview metadata.
+        let top_left=screen_point([-3453.,2887.,-600.],overview,360.,360.,1.,None).unwrap();
+        assert_eq!(top_left,(6.,6.));
+        let pos=[-1000.,1000.,-600.];
+        assert_eq!(screen_point(pos,overview,360.,360.,1.,Some(pos)),Some((180.,180.)));
+    }
+    #[test]fn countdown_expires_when_its_snapshot_stops_updating(){
+        assert_eq!(countdown_remaining(10.,100.,100.),Some(10.));
+        assert_eq!(countdown_remaining(10.,100.,105.),Some(5.));
+        assert_eq!(countdown_remaining(10.,100.,110.),None);
+        assert_eq!(countdown_remaining(10.,100.,120.),None);
+        assert_eq!(countdown_remaining(10.,100.,99.),Some(10.));
+        assert_eq!(countdown_remaining(f32::NAN,100.,100.),None);
+        assert_eq!(countdown_remaining(10.,f64::NAN,100.),None);
+        assert_eq!(countdown_remaining(10.,100.,f64::INFINITY),None);
     }
     #[test]fn defaults(){let s=OverlaySettings::default();assert!(s.topmost&&s.center_local&&s.follow_spectator&&!s.visible);assert!((s.zoom-1.0).abs()<0.01);}
     #[test]fn observer_setting_roundtrip(){
