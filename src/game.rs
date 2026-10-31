@@ -40,13 +40,13 @@ fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Op
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
-pub struct CS2Reader {pub schema:Schema, original_schema:Schema, process:Option<(u32,u64)>,layout:Layout, layout_source:u64,layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
+pub struct CS2Reader {pub schema:Schema, original_schema:Schema, process:Option<(u32,u64)>,layout:Layout, layout_source:u64,layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,recovery_error:Option<&'static str>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
 impl CS2Reader {
-    pub fn new(schema:Schema)->Self{Self{original_schema:schema.clone(),schema,process:None,layout:Layout::new(0),layout_source:0,layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
+    pub fn new(schema:Schema)->Self{Self{original_schema:schema.clone(),schema,process:None,layout:Layout::new(0),layout_source:0,layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,recovery_error:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
     pub fn reset(&mut self){
         self.schema=self.original_schema.clone();self.process=None;
         self.layout=Layout::new(0);self.layout_source=0;self.layout_at=None;self.probes=0;
-        self.chunk_cache.clear();self.recovery_at=None;self.runtime_offsets=false;self.planted_entity=None;
+        self.chunk_cache.clear();self.recovery_at=None;self.recovery_error=None;self.runtime_offsets=false;self.planted_entity=None;
     }
     pub fn failure_diagnostics(&self)->serde_json::Value{self.failure_diagnostics.clone()}
     fn probe_layout<M:Memory>(&mut self,p:&mut M,list:u64,offset_addr:u64,local:u64){
@@ -61,21 +61,16 @@ impl CS2Reader {
             if self.layout.slot.map(|slot|self.entity(p,self.layout.root,slot))==Some(local){return;}
             self.layout.confirmed=false;self.layout_at=None;self.chunk_cache.clear();
         }
+        if local==0{return;}
         if self.layout_at.is_some_and(|v|now.duration_since(v)<Duration::from_secs(3)){return;}
         self.layout_at=Some(now);self.probes=0;self.layout=Layout::new(list);
-        if local==0{return;}
-        let mut roots=vec![list,offset_addr,p.u64(list)]; roots.retain(|v|*v!=0);roots.sort_unstable();roots.dedup();
-        for root in roots {for chunk_offset in [0x10,0x00,0x08,0x18,0x20] {
-            let block=p.u64(root+chunk_offset);if block==0 {continue;}
-            for stride in [0x78usize,0x70] {
+        let mut roots=vec![list,offset_addr,p.u64(list)]; roots.retain(|v|valid_pointer(*v));roots.sort_unstable();roots.dedup();
+        for root in roots {for chunk_offset in crate::resolver::ENTITY_CHUNK_OFFSETS {
+            let block=p.u64(root+chunk_offset);if !valid_pointer(block) {continue;}
+            for stride in crate::resolver::ENTITY_STRIDES {
                 self.probes+=1;
-                if let Some(raw)=p.read(block,stride*65) {
-                    for slot in 1..=64u32 {
-                        let at=stride*slot as usize;
-                        if raw.get(at..at+8).and_then(|b|b.try_into().ok()).map(u64::from_le_bytes)==Some(local) {
-                            self.layout=Layout{root,chunk_offset,stride,confirmed:true,slot:Some(slot)};return;
-                        }
-                    }
+                if let Some(slot)=crate::resolver::controller_slot(p,block,stride,local) {
+                    self.layout=Layout{root,chunk_offset,stride,confirmed:true,slot:Some(slot)};return;
                 }
             }
         }}
@@ -84,12 +79,14 @@ impl CS2Reader {
         let chunk=index>>9;
         if let Some(&block)=self.chunk_cache.get(&chunk){return block;}
         let block=p.u64(list+self.layout.chunk_offset+8*chunk as u64);
+        let block=if valid_pointer(block){block}else{0};
         self.chunk_cache.insert(chunk,block);block
     }
     fn entity<M:Memory>(&mut self,p:&mut M,list:u64,index:u32)->u64 {
         if index>=0x8000 {return 0;}
         let block=self.block(p,list,index);if block==0{return 0;}
-        p.u64(block+self.layout.stride as u64*(index & 0x1ff) as u64)
+        let ptr=p.u64(block+self.layout.stride as u64*(index & 0x1ff) as u64);
+        if valid_pointer(ptr){ptr}else{0}
     }
     fn controllers<M:Memory>(&mut self,p:&mut M,list:u64,local:u64)->(Vec<(u32,u64)>,bool){
         let block=self.block(p,list,0);let mut out=Vec::new();
@@ -98,7 +95,7 @@ impl CS2Reader {
             if let Some(data)=p.read(block+stride as u64,64*stride) {
                 for slot in 1..=64u32 {let from=(slot-1) as usize*stride;
                     if let Some(ptr)=data.get(from..from+8).and_then(|b|b.try_into().ok()).map(u64::from_le_bytes){
-                        if ptr!=0{out.push((slot,ptr));}
+                        if valid_pointer(ptr){out.push((slot,ptr));}
                     }
                 }
             }
@@ -558,34 +555,51 @@ impl CS2Reader {
         diag.set("reader_stage",json!("entity_list"));
         diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
+        diag.set("offsets_revision",self.schema.info["revision"].clone());
         let build=if engine!=0{self.schema.engine_offset("dwBuildNumber")
             .and_then(|off|try_i32(p,engine+off)).filter(|b|*b>0)}else{None};
         diag.set("game_build",json!(build));
-        diag.set("offsets_match_game",json!(build.and_then(|b|self.schema.info["build_number"].as_u64().map(|n|n==b as u64))));
+        let same=build.and_then(|b|self.schema.info["build_number"].as_u64().map(|n|n==b as u64));
+        diag.set("offsets_match_game",json!(same));
         let mut list_off=self.schema.offset("dwEntityList").ok_or("Missing dwEntityList")?;
         let mut read=try_u64(p,base+list_off);
         // Keep the first failure, since scanning may make other memory reads.
         let read_error=if read.is_none(){p.last_error()}else{0};
         diag.set("entity_list_initial_read_ok",json!(read.is_some()));
         diag.set("entity_list_initial_win32_error",json!(read_error));
+        let controller_off=self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?;
+        let mut local=try_u64(p,base+controller_off).filter(|v|valid_pointer(*v)).unwrap_or(0);
+        if let Some(list)=read.filter(|v|valid_pointer(*v)){
+            self.probe_layout(p,list,base+list_off,local);self.chunk_cache.clear();
+        }
+        let invalid_layout=read.is_some_and(valid_pointer)&&local!=0&&!self.layout.confirmed;
+        if invalid_layout{self.runtime_offsets=false;}
         let secondary_unavailable=read.is_some_and(valid_pointer)&&
             (self.game_time(p,base).is_none()||self.current_map(p,base).is_none()||self.local_pawn_invalid(p,base));
         // Verified RVAs are static for this loaded client.dll. A temporarily
         // absent map or spectator pawn must not scan its entire code again.
-        if !self.runtime_offsets&&(!read.is_some_and(valid_pointer)||secondary_unavailable)
-            && self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
+        let recovery_reason=if !read.is_some_and(valid_pointer){Some("entity_list")}
+            else if invalid_layout{Some("entity_layout")}
+            else if !self.runtime_offsets&&same==Some(false){Some("build_mismatch")}
+            else if !self.runtime_offsets&&secondary_unavailable{Some("secondary_globals")}else{None};
+        if let Some(reason)=recovery_reason{diag.set("runtime_recovery_reason",json!(reason));}
+        if recovery_reason.is_some()&&self.recovery_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(30)) {
             self.recovery_at=Some(Instant::now());
             diag.set("runtime_recovery_attempted",json!(true));
-            diag.set("runtime_recovery_reason",json!(if secondary_unavailable{"secondary_globals"}else{"entity_list"}));
-            if let Some(recovered)=crate::resolver::recover_player_globals(p,base){
+            match crate::resolver::recover_player_globals(p,base){
+              Ok(recovered)=>{
                 self.schema.recover_player_offsets(recovered.entity_list_offset,recovered.local_controller_offset,&recovered.additional_offsets);
                 diag.set("runtime_recovered_globals",json!(recovered.additional_offsets.iter().map(|(name,_)|*name).collect::<Vec<_>>()));
                 self.layout=Layout::new(0);self.layout_source=0;self.layout_at=None;self.chunk_cache.clear();
-                self.runtime_offsets=true;
+                self.runtime_offsets=true;self.recovery_error=None;
                 list_off=recovered.entity_list_offset;read=try_u64(p,base+list_off);
+                local=try_u64(p,base+recovered.local_controller_offset).filter(|v|valid_pointer(*v)).unwrap_or(0);
+              }
+              Err(error)=>{self.recovery_error=Some(error);}
             }
         }
-        diag.set("runtime_offsets_verified",json!(self.runtime_offsets && read.is_some_and(valid_pointer)));
+        if let Some(error)=self.recovery_error{diag.set("runtime_recovery_error",json!(error));}
+        diag.set("runtime_offsets_verified",json!(self.runtime_offsets&&self.layout.confirmed&&read.is_some_and(valid_pointer)));
         diag.set("entity_list_read_ok",json!(read.is_some()));
         diag.set("entity_list_pointer_present",json!(read.is_some_and(valid_pointer)));
         let list=match read.filter(|v|valid_pointer(*v)){
@@ -602,18 +616,37 @@ impl CS2Reader {
                 });
             }
         };
-        let local=p.u64(base+self.schema.offset("dwLocalPlayerController").ok_or("Missing local controller offset")?);
         let local_pawn=opt_u64(p,base,self.schema.offset("dwLocalPlayerPawn"));
         let current_time=self.game_time(p,base);
         diag.set("game_time_available",json!(current_time.is_some()));
         diag.set("map_memory_available",json!(self.current_map(p,base).is_some()));
         diag.set("local_controller_found",json!(if local!=0 {1}else{0}));
         diag.set("local_pawn_found",json!(if local_pawn!=0 {1}else{0}));
+        // The final probe also handles globals recovered in this snapshot.
         self.probe_layout(p,list,base+list_off,local);self.chunk_cache.clear();
         let list=self.layout.root;
         diag.set("layout_confirmed",json!(self.layout.confirmed));diag.set("layout_local_slot",json!(self.layout.slot));
         diag.set("layout_stride",json!(self.layout.stride));diag.set("layout_chunk_offset",json!(self.layout.chunk_offset));
         diag.set("layout_candidates_checked",json!(self.probes));
+        diag.set("runtime_offsets_verified",json!(self.runtime_offsets&&self.layout.confirmed));
+        if !self.layout.confirmed{
+            // Never expand an unverified table into thousands of unrelated
+            // controller/C4/grenade reads or publish its fallback as live data.
+            let status=if local!=0{"error"}else{"no_players"};
+            let versions=match (build,self.schema.info["build_number"].as_u64()){
+                (Some(game),Some(offsets)) if same==Some(false)=>format!("Сборка игры {game}, офсеты {offsets}. "),_=>String::new()
+            };
+            let message=if local!=0{format!("{versions}Список сущностей не прошёл проверку: локальный контроллер не найден в слотах. Нужны совместимые офсеты; причина восстановления в DIAG.")}
+                else{format!("{versions}Локальный контроллер ещё не доступен. Откройте матч CS2.")};
+            diag.set("reader_stage",json!("entity_layout"));diag.set("entity_scans_skipped",json!(true));
+            diag.set("controller_entries",json!(0));diag.set("players",json!(0));
+            diag.set("local_controller_in_slots",json!(0));diag.set("local_fallback_used",json!(0));
+            diag.set("read_attempts",json!(p.read_count()-before_read));diag.set("read_failures",json!(p.fail_count()-before_fail));
+            diag.set("last_win32_error",json!(p.last_error()));
+            diag.set("read_ms",json!((start.elapsed().as_secs_f64()*100000.).round()/100.));
+            let diagnostics=diag.value();self.failure_diagnostics=diagnostics.clone();
+            return Ok(Snapshot{pid,diagnostics,..Snapshot::status(status,&message)});
+        }
         let s=&self.schema;
         let team_off=field(s,"C_BaseEntity","m_iTeamNum")?;
         let health_off=field(s,"C_BaseEntity","m_iHealth")?;
@@ -781,10 +814,6 @@ impl CS2Reader {
         diag.set("last_win32_error",json!(p.last_error()));diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
         diag.set("offsets_revision",self.schema.info["revision"].clone());
-        let build=if engine!=0{self.schema.engine_offset("dwBuildNumber").and_then(|o|try_i32(p,engine+o)).filter(|b|*b>0)}else{None};
-        diag.set("game_build",json!(build));
-        let same=build.and_then(|b|self.schema.info["build_number"].as_u64().map(|v|v==b as u64));
-        diag.set("offsets_match_game",json!(same));
         diag.set("read_ms",json!((start.elapsed().as_secs_f64()*100000.).round()/100.));
         diag.set("controller_team_histogram",json!(histogram));
         let verified=players.iter().filter(|p|p.life_state!="unknown").count();
@@ -793,7 +822,6 @@ impl CS2Reader {
             let reason=if diag.num("controller_entries")==0{"Список контроллеров пуст."}
             else if diag.num("resolved_pawns")==0{"Контроллеры найдены, но pawn не разрешаются."}
             else if diag.num("valid_teams")==0{"Не удалось подтвердить команды игроков."}
-            else if !self.layout.confirmed && local!=0{"Локальный контроллер не найден в слотах списка сущностей."}
             else{"Координаты pawn не читаются: проверьте schema/игровой процесс."};Some(reason.to_owned())
         }else if verified!=players.len(){Some("Часть игроков имеет неподтверждённое состояние жизни".into())}else{None};
         Ok(Snapshot{status:status.into(),pid,local_team,
@@ -1033,7 +1061,7 @@ mod bomb_read_tests {
  use super::*;use crate::process::FakeMemory;
  const BASE:u64=0x100000;const LIST:u64=0x200000;const BLOCK:u64=0x300000;const CTL:u64=0x400000;const PAWN:u64=0x500000;const NODE:u64=0x600000;
  fn reader()->CS2Reader {
-  let off=json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16,"dwGlobalVars":24,"dwLocalPlayerPawn":32}});
+  let off=json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16,"dwGlobalVars":24,"dwLocalPlayerPawn":32},"engine2.dll":{"dwBuildNumber":8}});
   let cls=json!({"client.dll":{"classes":{
    "CCSPlayerController":{"fields":{"m_hPlayerPawn":32,"m_bPawnIsAlive":36}},
    "CBasePlayerController":{"fields":{"m_nTickBase":48,"m_steamID":64}},
@@ -1090,6 +1118,56 @@ mod bomb_read_tests {
   put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,112);
   let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
   assert_eq!(s.diagnostics["layout_stride"],112);assert_eq!(s.players[0].id,3);
+ }
+ #[test]fn an_unreadable_identity_does_not_hide_a_readable_controller_slot(){
+  let mut r=reader();let mut p=initial();
+  put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,112);
+  // Bulk reads fail, but the entity pointers themselves remain readable.
+  p.mem.remove(&(BLOCK+128));
+  let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.diagnostics["layout_confirmed"],true);
+  assert_eq!(s.diagnostics["layout_stride"],112);
+  assert_eq!(s.players.len(),1);assert_eq!(s.players[0].id,3);
+ }
+ #[test]fn a_controller_appearing_after_startup_is_probed_without_waiting(){
+  let mut r=reader();let mut p=initial();p.put(BASE+16,&0u64.to_le_bytes());
+  assert_eq!(r.snapshot(&mut p,BASE,0,1,false,false).unwrap().status,"no_players");
+  p.put(BASE+16,&CTL.to_le_bytes());
+  let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  assert_eq!(s.diagnostics["layout_confirmed"],true);assert_eq!(s.players[0].id,3);
+ }
+ #[test]fn an_unconfirmed_table_is_an_error_and_does_not_scan_world_entities(){
+  let mut r=reader();let mut p=initial();
+  r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+  r.runtime_offsets=true;r.recovery_at=None;
+  p.put(BLOCK+3*120,&0u64.to_le_bytes());
+  let s=r.snapshot(&mut p,BASE,0,1,true,true).unwrap();
+  assert_eq!(s.status,"error");assert!(s.players.is_empty());
+  assert_eq!(s.diagnostics["reader_stage"],"entity_layout");
+  assert_eq!(s.diagnostics["entity_scans_skipped"],true);
+  assert_eq!(s.diagnostics["runtime_offsets_verified"],false);
+  assert_eq!(s.diagnostics["runtime_recovery_error"],"invalid_pe");
+  let next=r.snapshot(&mut p,BASE,0,1,true,true).unwrap();
+  assert_eq!(next.diagnostics["runtime_recovery_error"],"invalid_pe");
+  assert!(next.diagnostics.get("runtime_recovery_attempted").is_none());
+ }
+ #[test]fn failed_layout_reports_the_game_and_offsets_builds(){
+  let mut r=reader();r.original_schema.info["build_number"]=json!(14193);
+  let mut p=initial();let engine=0x700000;
+  p.put(engine+8,&14194i32.to_le_bytes());p.put(BLOCK+3*120,&0u64.to_le_bytes());
+  let s=r.snapshot(&mut p,BASE,engine,1,true,true).unwrap();
+  assert_eq!(s.status,"error");assert_eq!(s.diagnostics["offsets_match_game"],false);
+  let message=s.message.unwrap();assert!(message.contains("14194"));assert!(message.contains("14193"));
+ }
+ #[test]fn build_mismatch_triggers_recovery_even_with_valid_map_clock_and_layout(){
+  let mut r=reader();let mut p=initial();let engine=0x700000;
+  p.put(engine+8,&2i32.to_le_bytes());p.put(BASE+24,&0x800000u64.to_le_bytes());
+  p.put(0x800030,&100f32.to_le_bytes());p.put(0x800180,&0x810000u64.to_le_bytes());p.put(0x810000,b"de_nuke\0");
+  let s=r.snapshot(&mut p,BASE,engine,1,false,false).unwrap();
+  assert_eq!(s.diagnostics["runtime_recovery_attempted"],true);
+  assert_eq!(s.diagnostics["runtime_recovery_reason"],"build_mismatch");
+  assert_eq!(s.diagnostics["layout_confirmed"],true);
+  assert_eq!(s.status,"live");assert_eq!(s.players[0].id,3);
  }
  #[test]fn recovered_addresses_are_not_reused_in_the_next_process(){
   let mut r=reader();let mut p=initial();r.snapshot(&mut p,BASE,0,1,false,false).unwrap();

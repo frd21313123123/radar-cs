@@ -11,6 +11,8 @@ struct Section {start:u64,end:u64,flags:u32}
 const EXEC:u32=0x2000_0000;
 const READ:u32=0x4000_0000;
 const CHUNK:usize=16*1024;
+pub(crate) const ENTITY_CHUNK_OFFSETS:[u64;5]=[0x10,0,8,0x18,0x20];
+pub(crate) const ENTITY_STRIDES:[usize;2]=[0x78,0x70];
 fn canonical(ptr:u64)->bool{(0x10000..=0x7fff_ffff_ffff).contains(&ptr)}
 fn u16_at(bytes:&[u8],at:usize)->Option<u16>{Some(u16::from_le_bytes(bytes.get(at..at+2)?.try_into().ok()?))}
 fn u32_at(bytes:&[u8],at:usize)->Option<u32>{Some(u32::from_le_bytes(bytes.get(at..at+4)?.try_into().ok()?))}
@@ -64,9 +66,8 @@ const EXTRA:&[Signature]=&[
 fn collect(bytes:&[u8],rva:u64,matches:&mut [BTreeSet<u64>]){
     for i in 0..bytes.len(){
         let rest=&bytes[i..];
-        if rest.len()>=13&&rest[..3]==[0x48,0x89,0x0d]&&rest[7]==0xe9&&rest[12]==0xcc{matches[0].insert(rva+i as u64);}
-        if rest.len()>=10&&rest[..3]==[0x48,0x8b,0x05]&&rest[7..10]==[0x41,0x89,0xbe]{matches[1].insert(rva+i as u64);}
-        if matches[..2].iter().any(|m|m.len()>1){return;}
+        if matches[0].len()<2&&rest.len()>=13&&rest[..3]==[0x48,0x89,0x0d]&&rest[7]==0xe9&&rest[12]==0xcc{matches[0].insert(rva+i as u64);}
+        if matches[1].len()<2&&rest.len()>=10&&rest[..3]==[0x48,0x8b,0x05]&&rest[7..10]==[0x41,0x89,0xbe]{matches[1].insert(rva+i as u64);}
         for (kind,pattern) in EXTRA.iter().enumerate(){
             if matches[kind+2].len()<2 && rest.len()>=pattern.bytes.len()
                 && rest.iter().zip(pattern.bytes).all(|(byte,want)|*want<0||*byte==*want as u8){
@@ -88,7 +89,6 @@ fn scan<M:Memory>(p:&mut M,base:u64,section:Section,matches:&mut [BTreeSet<u64>]
             if let Some(bytes)=bytes{
                 let mut joined=tail.clone();joined.extend_from_slice(&bytes);
                 collect(&joined,at+inside as u64-tail.len() as u64,matches);
-                if matches[..2].iter().any(|m|m.len()>1){return;}
                 tail=joined[joined.len().saturating_sub(32)..].to_vec();
             }else{tail.clear();}
             inside+=n;
@@ -104,35 +104,57 @@ fn global_target<M:Memory>(p:&mut M,base:u64,signature:u64,sections:&[Section])-
     if !sections.iter().any(|s|s.flags&READ!=0&&s.flags&EXEC==0&&target>=s.start&&target.checked_add(8).is_some_and(|end|end<=s.end)){return None;}
     Some(target)
 }
+pub(crate) fn controller_slot<M:Memory>(p:&mut M,block:u64,stride:usize,controller:u64)->Option<u32>{
+    if let Some(raw)=p.read(block,stride*65){
+        return (1..=64).find(|slot|{
+            let at=*slot as usize*stride;
+            raw.get(at..at+8).and_then(|b|b.try_into().ok()).map(u64::from_le_bytes)==Some(controller)
+        });
+    }
+    // One unreadable byte anywhere in the bulk range must not hide readable
+    // slots, especially when confirming the non-default stride after restart.
+    (1..=64).find(|slot|pointer(p,block+stride as u64*(*slot as u64))==Some(controller))
+}
 fn controller_in_list<M:Memory>(p:&mut M,list:u64,controller:u64)->bool{
-    for offset in [0x10,0,8,0x18,0x20]{
+    for offset in ENTITY_CHUNK_OFFSETS{
         let Some(block)=pointer(p,list+offset).filter(|v|canonical(*v)) else{continue;};
-        for stride in [0x78,0x70]{
-            // Individual bounded reads also work across partially unreadable pages.
-            for slot in 1..=64{
-                if pointer(p,block+stride*slot)==Some(controller){return true;}
-            }
+        for stride in ENTITY_STRIDES{
+            if controller_slot(p,block,stride,controller).is_some(){return true;}
         }
     }
     false
 }
-pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlobals>{
-    let (_,sections)=sections(p,base)?;let mut matches:Vec<BTreeSet<u64>>=(0..2+EXTRA.len()).map(|_|BTreeSet::new()).collect();
+pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Result<RecoveredGlobals,&'static str>{
+    let (_,sections)=sections(p,base).ok_or("invalid_pe")?;let mut matches:Vec<BTreeSet<u64>>=(0..2+EXTRA.len()).map(|_|BTreeSet::new()).collect();
     for section in sections.iter().filter(|s|s.flags&EXEC!=0){
         scan(p,base,*section,&mut matches);
-        if matches[..2].iter().any(|m|m.len()>1){return None;}
     }
-    if matches[..2].iter().any(|m|m.len()!=1){return None;}
-    let entity_list_offset=global_target(p,base,*matches[0].first()?,&sections)?;
-    let local_controller_offset=global_target(p,base,*matches[1].first()?,&sections)?;
-    if entity_list_offset==local_controller_offset{return None;}
-    let list=pointer(p,base+entity_list_offset).filter(|v|canonical(*v))?;
-    let controller=pointer(p,base+local_controller_offset).filter(|v|canonical(*v))?;
-    if !controller_in_list(p,list,controller){return None;}
+    if matches[1].is_empty(){return Err("local_controller_signature_missing");}
+    if matches[1].len()!=1{return Err("local_controller_signature_ambiguous");}
+    let local_controller_offset=global_target(p,base,*matches[1].first().unwrap(),&sections).ok_or("invalid_local_controller_target")?;
+    let controller=pointer(p,base+local_controller_offset).filter(|v|canonical(*v)).ok_or("local_controller_unavailable")?;
+    // cs2-dumper exposes the entity-system global through an independent
+    // signature. It can recover the same table if the store signature changed.
+    let system_kind=EXTRA.iter().position(|pattern|pattern.name=="dwGameEntitySystem").unwrap()+2;
+    let mut candidates=BTreeSet::new();
+    for kind in [0,system_kind]{
+        if matches[kind].len()!=1{continue;}
+        if let Some(offset)=global_target(p,base,*matches[kind].first().unwrap(),&sections){
+            if offset!=local_controller_offset{candidates.insert(offset);}
+        }
+    }
+    if candidates.is_empty(){return Err("entity_list_signature_unavailable");}
+    let validated:Vec<u64>=candidates.into_iter().filter(|offset|{
+        pointer(p,base+offset).filter(|list|canonical(*list))
+            .is_some_and(|list|controller_in_list(p,list,controller))
+    }).collect();
+    if validated.is_empty(){return Err("local_controller_not_in_entity_list");}
+    if validated.len()!=1{return Err("entity_list_ambiguous");}
+    let entity_list_offset=validated[0];
     let mut additional_offsets=Vec::new();let mut prediction=None;
     for (i,pattern) in EXTRA.iter().enumerate(){
         if matches[i+2].len()!=1 || pattern.name=="prediction_pawn_field"{continue;}
-        let at=*matches[i+2].first()?+pattern.rip as u64;
+        let at=*matches[i+2].first().unwrap()+pattern.rip as u64;
         if let Some(offset)=global_target(p,base,at,&sections){
             if pattern.name=="dwPrediction"{prediction=Some(offset);}
             additional_offsets.push((pattern.name,offset));
@@ -140,7 +162,7 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
     }
     let pawn_matches=&matches[2+EXTRA.len()-1];
     if let Some(prediction)=prediction.filter(|_|pawn_matches.len()==1){
-        if let Some(raw)=p.read(base+*pawn_matches.first()?+3,4){
+        if let Some(raw)=p.read(base+*pawn_matches.first().unwrap()+3,4){
             if let Some(field)=u32_at(&raw,0).filter(|v|*v<=0x10000){
                 let offset=prediction+field as u64;
                 if sections.iter().any(|s|s.flags&READ!=0&&s.flags&EXEC==0&&offset>=s.start&&offset+8<=s.end){
@@ -149,7 +171,7 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
             }
         }
     }
-    Some(RecoveredGlobals{entity_list_offset,local_controller_offset,additional_offsets})
+    Ok(RecoveredGlobals{entity_list_offset,local_controller_offset,additional_offsets})
 }
 
 #[cfg(test)]mod tests{
@@ -174,46 +196,60 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
         p.put(0x200010,&0x300000u64.to_le_bytes());p.put(0x300000+3*0x78,&0x400000u64.to_le_bytes());p
     }
     #[test]fn recovers_signed_rip_displacements_and_validates_controller(){
-        assert_eq!(recover_player_globals(&mut fixture(),BASE),Some(RecoveredGlobals{entity_list_offset:0x1100,local_controller_offset:0x1110,additional_offsets:vec![]}));
+        assert_eq!(recover_player_globals(&mut fixture(),BASE),Ok(RecoveredGlobals{entity_list_offset:0x1100,local_controller_offset:0x1110,additional_offsets:vec![]}));
     }
     #[test]fn finds_signature_crossing_a_chunk_boundary_without_duplicate_matches(){
         let mut p=fixture();p.put(BASE+0x3100,&[0;13]);signature(&mut p,0x3000+CHUNK as u64-6,0x1100,true);
-        assert!(recover_player_globals(&mut p,BASE).is_some());
+        assert!(recover_player_globals(&mut p,BASE).is_ok());
     }
     #[test]fn unreadable_page_does_not_hide_later_readable_signatures(){
         let mut p=fixture();p.put(BASE+0x3200,&[0;10]);signature(&mut p,0x6000,0x1110,false);
         for at in BASE+0x4000..BASE+0x5000{p.mem.remove(&at);}
-        assert!(recover_player_globals(&mut p,BASE).is_some());
+        assert!(recover_player_globals(&mut p,BASE).is_ok());
     }
     #[test]fn rejects_ambiguous_or_absent_signatures(){
-        let mut p=fixture();signature(&mut p,0x3300,0x1100,true);assert!(recover_player_globals(&mut p,BASE).is_none());
-        let mut p=fixture();p.put(BASE+0x3200,&[0;10]);assert!(recover_player_globals(&mut p,BASE).is_none());
+        let mut p=fixture();signature(&mut p,0x3300,0x1100,true);assert!(recover_player_globals(&mut p,BASE).is_err());
+        let mut p=fixture();p.put(BASE+0x3200,&[0;10]);assert!(recover_player_globals(&mut p,BASE).is_err());
     }
     #[test]fn stale_offsets_recover_into_a_populated_live_snapshot(){
         use crate::{game::CS2Reader,schema::Schema};use serde_json::json;
-        let mut p=fixture();
-        let offsets=json!({"client.dll":{"dwEntityList":0x200,"dwLocalPlayerController":0x208}});
-        let classes=json!({"client.dll":{"classes":{
-            "CCSPlayerController":{"fields":{"m_hPlayerPawn":0x20,"m_bPawnIsAlive":0x24}},
-            "C_BaseEntity":{"fields":{"m_iTeamNum":0x10,"m_iHealth":0x14,"m_pGameSceneNode":0x28}},
-            "CGameSceneNode":{"fields":{"m_vecAbsOrigin":0x10}}
-        }}});
-        // Initially both obsolete globals are readable zero. Recovery finds
-        // the signed RIP-relative globals and validates controller slot 3.
-        p.put(0x400000+0x10,&[2]);put32(&mut p,0x400000+0x20,100);p.put(0x400000+0x24,&[1]);
-        p.put(0x300000+100*0x78,&0x500000u64.to_le_bytes());
-        p.put(0x500000+0x10,&[2]);put32(&mut p,0x500000+0x14,100);
-        p.put(0x500000+0x28,&0x600000u64.to_le_bytes());
-        let position:Vec<u8>=[100f32,200.,64.].iter().flat_map(|v|v.to_le_bytes()).collect();p.put(0x600010,&position);
-        let mut reader=CS2Reader::new(Schema::from_json(&offsets,&classes,json!({"build_number":123})).unwrap());
-        for frame in 0..2{
-            let snapshot=reader.snapshot(&mut p,BASE,0,42,false,false).unwrap();
-            assert_eq!(snapshot.status,"live");assert_eq!(snapshot.players.len(),1);
-            assert_eq!(snapshot.players[0].id,3);assert_eq!(snapshot.players[0].health,Some(100));
-            assert_eq!(snapshot.players[0].position,[100.,200.,64.]);
-            assert_eq!(snapshot.diagnostics["runtime_offsets_verified"],true);
-            if frame==0{assert_eq!(snapshot.diagnostics["runtime_recovery_attempted"],true);}
-            else{assert!(snapshot.diagnostics.get("runtime_recovery_attempted").is_none());}
+        for readable_stale_list in [false,true]{
+            let mut p=fixture();
+            let offsets=json!({"client.dll":{"dwEntityList":0x200,"dwLocalPlayerController":0x208,"dwGlobalVars":0x210,"dwLocalPlayerPawn":0x218}});
+            let classes=json!({"client.dll":{"classes":{
+                "CCSPlayerController":{"fields":{"m_hPlayerPawn":0x20,"m_bPawnIsAlive":0x24}},
+                "CBasePlayerController":{"fields":{"m_nTickBase":0x30}},
+                "C_BaseEntity":{"fields":{"m_iTeamNum":0x10,"m_iHealth":0x14,"m_pGameSceneNode":0x28}},
+                "CGameSceneNode":{"fields":{"m_vecAbsOrigin":0x10}}
+            }}});
+            // Initially both obsolete globals are readable zero. Recovery finds
+            // the signed RIP-relative globals and validates controller slot 3.
+            p.put(0x400000+0x10,&[2]);put32(&mut p,0x400000+0x20,100);p.put(0x400000+0x24,&[1]);
+            p.put(0x300000+100*0x78,&0x500000u64.to_le_bytes());
+            p.put(0x500000+0x10,&[2]);put32(&mut p,0x500000+0x14,100);
+            p.put(0x500000+0x28,&0x600000u64.to_le_bytes());
+            let position:Vec<u8>=[100f32,200.,64.].iter().flat_map(|v|v.to_le_bytes()).collect();p.put(0x600010,&position);
+            if readable_stale_list{
+                // Every global is readable, and map/clock/pawn fields validate.
+                // Only the controller-to-table relationship exposes the stale list.
+                p.put(BASE+0x200,&0x700000u64.to_le_bytes());
+                p.put(0x700010,&0x710000u64.to_le_bytes());p.put(0x710000,&vec![0;65*0x78]);
+                p.put(BASE+0x208,&0x400000u64.to_le_bytes());
+                p.put(BASE+0x210,&0x800000u64.to_le_bytes());p.put(BASE+0x218,&0x500000u64.to_le_bytes());
+                p.put(0x800030,&100f32.to_le_bytes());p.put(0x800180,&0x810000u64.to_le_bytes());p.put(0x810000,b"de_nuke\0");
+                put32(&mut p,0x400030,6400);
+            }
+            let mut reader=CS2Reader::new(Schema::from_json(&offsets,&classes,json!({"build_number":123})).unwrap());
+            for frame in 0..2{
+                let snapshot=reader.snapshot(&mut p,BASE,0,42,false,false).unwrap();
+                assert_eq!(snapshot.status,"live");assert_eq!(snapshot.players.len(),1);
+                assert_eq!(snapshot.players[0].id,3);assert_eq!(snapshot.players[0].health,Some(100));
+                assert_eq!(snapshot.players[0].position,[100.,200.,64.]);
+                assert_eq!(snapshot.diagnostics["runtime_offsets_verified"],true);
+                assert_eq!(snapshot.diagnostics["layout_confirmed"],true);
+                if frame==0{assert_eq!(snapshot.diagnostics["runtime_recovery_attempted"],true);}
+                else{assert!(snapshot.diagnostics.get("runtime_recovery_attempted").is_none());}
+            }
         }
     }
     fn extra_signature(p:&mut FakeMemory,index:usize,at:u64,target:u64){
@@ -222,6 +258,20 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
         let rip=pattern.rip;
         let disp=if pattern.name=="prediction_pawn_field"{0x50}else{(target as i64-at as i64-rip as i64-7) as i32};
         bytes[rip+3..rip+7].copy_from_slice(&disp.to_le_bytes());p.put(BASE+at,&bytes);
+    }
+    #[test]fn entity_system_signature_can_recover_a_missing_entity_list_signature(){
+        for ambiguous_primary in [false,true]{
+            let mut p=fixture();p.put(BASE+0x3100,&[0;13]);
+            if ambiguous_primary{signature(&mut p,0x3100,0x1100,true);signature(&mut p,0x3300,0x1100,true);}
+            extra_signature(&mut p,4,0x3500,0x1100);
+            assert_eq!(recover_player_globals(&mut p,BASE).unwrap().entity_list_offset,0x1100);
+        }
+    }
+    #[test]fn independent_signatures_must_not_select_between_two_different_valid_tables(){
+        let mut p=fixture();extra_signature(&mut p,4,0x3500,0x1120);
+        p.put(BASE+0x1120,&0x700000u64.to_le_bytes());p.put(0x700010,&0x710000u64.to_le_bytes());
+        p.put(0x710000+3*0x78,&0x400000u64.to_le_bytes());
+        assert_eq!(recover_player_globals(&mut p,BASE),Err("entity_list_ambiguous"));
     }
     #[test]fn recovers_clock_map_and_bomb_globals_together_with_players(){
         let mut memory=fixture();
@@ -241,9 +291,9 @@ pub fn recover_player_globals<M:Memory>(p:&mut M,base:u64)->Option<RecoveredGlob
         assert!(recovered.additional_offsets.contains(&("dwPlantedC4",0x1150)));
     }
     #[test]fn rejects_bad_pe_outside_targets_or_unvalidated_pointers(){
-        let mut p=fixture();put32(&mut p,BASE+0x98+56,0x40000000);assert!(recover_player_globals(&mut p,BASE).is_none());
-        let mut p=fixture();signature(&mut p,0x3100,0xa000,true);assert!(recover_player_globals(&mut p,BASE).is_none());
-        let mut p=fixture();signature(&mut p,0x3100,0x3500,true);assert!(recover_player_globals(&mut p,BASE).is_none());
-        let mut p=fixture();p.put(0x300000+3*0x78,&0u64.to_le_bytes());assert!(recover_player_globals(&mut p,BASE).is_none());
+        let mut p=fixture();put32(&mut p,BASE+0x98+56,0x40000000);assert!(recover_player_globals(&mut p,BASE).is_err());
+        let mut p=fixture();signature(&mut p,0x3100,0xa000,true);assert!(recover_player_globals(&mut p,BASE).is_err());
+        let mut p=fixture();signature(&mut p,0x3100,0x3500,true);assert!(recover_player_globals(&mut p,BASE).is_err());
+        let mut p=fixture();p.put(0x300000+3*0x78,&0u64.to_le_bytes());assert!(recover_player_globals(&mut p,BASE).is_err());
     }
 }
