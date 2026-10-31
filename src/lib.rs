@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod avatars;
 pub mod game;
 pub mod grenade;
 pub mod gsi;

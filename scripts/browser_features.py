@@ -3,6 +3,43 @@ import time
 from copy import deepcopy
 
 
+def check_steam_avatars(page):
+    state = page.evaluate("JSON.parse(JSON.stringify(snapshot))")
+    first, second = "76561197960287930", "76561198000000001"
+    for player in state["players"]:
+        player["steam_id"] = None
+        player["agent_model"] = "characters/models/tm_professional/tm_professional_varf5.vmdl"
+    state["players"][0]["steam_id"] = first
+    state["players"][1]["steam_id"] = second
+    player_id = state["players"][0]["id"]
+
+    def avatars_state(route):
+        state["time"] = time.time()
+        route.fulfill(json=state)
+
+    page.route("**/api/state?*", avatars_state)
+    try:
+        page.wait_for_function("() => document.querySelectorAll('.steam-avatar').length===2")
+        page.wait_for_function("() => [...document.querySelectorAll('.steam-avatar')].every(img=>img.complete&&img.naturalWidth>0)")
+        ids = page.locator(".steam-avatar").evaluate_all("images=>images.map(img=>new URL(img.src).searchParams.get('steam_id'))")
+        assert ids == [first, second], "SteamID64 was rounded or replaced by an agent model"
+        assert page.locator('.agent-portrait, img[src*="/api/agent-icon"]').count() == 0
+        assert page.locator(".card-avatar:not(:has(img))").count() > 0, "Missing Steam avatars must keep a neutral silhouette"
+        state["players"][0]["steam_id"] = second
+        page.wait_for_function("([id,steamId]) => new URL(document.querySelector(`.player[data-id='${id}'] .steam-avatar`).src).searchParams.get('steam_id')===steamId", arg=[player_id, second])
+
+        def broken_avatar(route):
+            route.abort()
+
+        page.route("**/api/steam-avatar?steam_id=76561198000000003&*", broken_avatar)
+        state["players"][0]["steam_id"] = "76561198000000003"
+        page.wait_for_function("id => document.querySelector(`.player[data-id='${id}'] .steam-avatar`)?.hidden===true", arg=player_id)
+        print("PASS: player cards load exact Steam avatars, update reused slots and keep neutral fallbacks")
+    finally:
+        page.unroute("**/api/state?*", avatars_state)
+        page.unroute("**/api/steam-avatar?steam_id=76561198000000003&*")
+
+
 def check_noise(page):
     page.locator("#layerSelect").select_option("default")
     state = page.evaluate("JSON.parse(JSON.stringify(snapshot))")

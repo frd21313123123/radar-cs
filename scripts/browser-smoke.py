@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import Thread
 
 from playwright.sync_api import sync_playwright
-from browser_features import check_noise, check_settings, check_bomb_age, check_render_budget
+from browser_features import check_steam_avatars, check_noise, check_settings, check_bomb_age, check_render_budget
 
 
 class StalledJSON(BaseHTTPRequestHandler):
@@ -55,6 +55,7 @@ def check_browser(url, executable, screenshots=None):
             a.wait_for_selector(".player")
             assert a.locator(".card-health").count() == 6
             assert a.locator(".card-inventory .equip-chip").count() > 0
+            check_steam_avatars(a)
 
             a.locator("#mapSelect").select_option("de_nuke")
             a.wait_for_function("() => map==='de_nuke'&&!autoMapEnabled&&!mapSelectionPending")
@@ -194,6 +195,8 @@ def main():
         shutil.copyfile(root / "web/index.html", work / "web/index.html")
         for name in ("de_mirage_radar_psd.png", "de_nuke_radar_psd.png", "de_nuke_lower_radar_psd.png"):
             shutil.copyfile(root / "assets/bomb_ground.png", work / "cache" / name)
+        for steam_id in ("76561197960287930", "76561198000000001"):
+            shutil.copyfile(root / "assets/bomb_ground.png", work / "cache" / f"steam_avatar_{steam_id}.img")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]

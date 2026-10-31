@@ -120,9 +120,9 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 .small-btn,.radar-tool,.team-button{min-width:28px;min-height:28px}
 .player{cursor:pointer;border-radius:12px;margin-bottom:12px}
 .card-top{padding:11px 10px;min-height:66px}
-.card-avatar{position:relative;width:45px;height:49px;overflow:hidden;border-radius:9px;background:#162330!important}
+.card-avatar{position:relative;width:45px;height:45px;overflow:hidden;border-radius:9px;background:#162330!important}
 .card-avatar>svg{width:30px;height:36px;color:#bdcddd}
-.card-avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 20%;background:#14212c}
+.card-avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;background:#14212c}
 .card-name{font-size:12px;max-width:145px;color:#f0f6fa}
 .card-role{font-size:10px;letter-spacing:.03em;color:#b7c7d3}
 .card-health{font-size:18px}.card-health small{font-size:9px;color:#a9bdcc}
@@ -140,7 +140,7 @@ main{grid-template-columns:minmax(225px,270px) minmax(0,1fr) minmax(225px,270px)
 .card-bottom .cash{font-size:11px}.flash-status{color:#fff;font-weight:800}
 .telemetry-key{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:#c1d1db;margin-top:7px;line-height:1.5}
 .telemetry-key b{font-size:12px;color:#f3f8fb}.legend{height:auto;min-height:50px;padding-top:8px;padding-bottom:8px}
-@media(max-width:1150px){.card-name{max-width:115px}.card-avatar{width:35px;height:42px}.card-health{font-size:15px}.card-primary img{width:37px}}
+@media(max-width:1150px){.card-name{max-width:115px}.card-avatar{width:35px;height:35px}.card-health{font-size:15px}.card-primary img{width:37px}}
 @media(max-width:800px){.player .card-avatar{display:grid}.telemetry-key{gap:6px 10px}.card-name{max-width:none}.legend .hint{display:none}}
 
 /* Settings keep navigation and actions visible while the selected section scrolls. */
@@ -596,9 +596,9 @@ function playerCard(p){
  const role=p.local?'Вы':life==='dead'?'Погиб':life==='unknown'?'Состояние неизвестно':'В игре';
  const bomb=isCarrier(p),flashed=isFlashed(p);
  const height=p.team!==localTeam()?relativeHeight(p.position,referencePosition()):0;
- const model=typeof p.agent_model==='string'?p.agent_model:'';
+ const steamId=typeof p.steam_id==='string'&&/^\d{17}$/.test(p.steam_id)?p.steam_id:'';
  const silhouette='<svg viewBox="0 0 32 40" aria-hidden="true" fill="currentColor"><circle cx="16" cy="11" r="7"/><path d="M3 36v-6c0-9 26-9 26 0v6z"/></svg>';
- const avatar=`<div class="card-avatar" title="${safeText(model?'Скин персонажа: '+model:'Модель персонажа недоступна')}">${silhouette}${model?`<img loading="lazy" class="agent-portrait" src="${safeText(asset('/api/agent-icon?model='+encodeURIComponent(model)))}" alt="Скин персонажа">`:''}</div>`;
+ const avatar=`<div class="card-avatar" title="${safeText(steamId?'Профиль Steam: '+steamId:'Аватар Steam недоступен')}">${silhouette}${steamId?`<img loading="lazy" class="steam-avatar" src="${safeText(asset('/api/steam-avatar?steam_id='+encodeURIComponent(steamId)))}" alt="${safeText('Аватар Steam: '+p.name)}">`:''}</div>`;
  return `<div class="player ${life} ${p.id===selected?'selected':''}" role="button" tabindex="0" aria-pressed="${p.id===selected}" aria-label="${safeText(p.name)}, ${hp??'неизвестно'} ХП, ${safeText(p.weapon||'оружие неизвестно')}${flashed?', ослеплён':''}${height>0?', выше вас':height<0?', ниже вас':''}" data-id="${Number(p.id)}" style="--player-color:${color};--player-soft:${color}20" title="Выделить игрока на карте">
  <div class="card-top"><div class="card-identity">${avatar}<div style="min-width:0"><div class="card-name" title="${safeText(p.name)}">${safeText(p.name)}${p.local?' ★':''}</div><div class="card-role">${role}${height?` · ${height>0?'↑ выше':'↓ ниже'}`:''}${flashed?' · <span class="flash-status">Ослеплён</span>':''}</div></div></div><div class="card-health"><span class="heart" aria-hidden="true">♥</span>${hp??'?'}<small>ХП</small></div></div>
  <div class="card-hp-track"><div class="card-hp-fill" style="width:${Math.min(hp??0,100)}%;background:${hp!==null&&hp<=25?'#ff8181':'#80ddb3'}"></div></div>
@@ -608,7 +608,7 @@ function playerCard(p){
 }
 function repaintPlayers(){const stale=snapshotStale(),all=stale?[]:snapshot.players||[],list=visiblePlayers();
  const listKey=JSON.stringify([stale,selected,$('search').value,ct,t,localTeam(),prefs,snapshot.bomb_carrier_id,snapshot.bomb_world,snapshot.bomb_carrier_source,
-   list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory,p.agent_model,isFlashed(p),relativeHeight(p.position,referencePosition())])]);
+   list.map(p=>[p.id,p.name,p.local,p.team,p.life_state,p.health,p.weapon,p.money,p.armor,p.helmet,p.defuser,p.has_c4,p.c4_source,p.inventory,p.steam_id,isFlashed(p),relativeHeight(p.position,referencePosition())])]);
  if(listKey===lastListKey)return;lastListKey=listKey;
  $('playerCount').textContent=String(all.filter(playerVisible).length).padStart(2,'0');
  $('totalCount').textContent=all.filter(p=>knownLife(p)==='alive').length+' ALIVE · '+all.filter(p=>knownLife(p)==='dead').length+' DEAD';
@@ -799,7 +799,7 @@ for(const id of ['tPlayers','ctPlayers']){
  $(id).addEventListener('click',selectRow);
  $(id).addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();const id=e.target.closest('.player')?.dataset.id;selectRow(e);document.querySelector(`.player[data-id="${Number(id)}"]`)?.focus();}});
 }
-document.addEventListener('error',e=>{if(e.target?.classList?.contains('agent-portrait'))e.target.hidden=true;},true);
+document.addEventListener('error',e=>{if(e.target?.classList?.contains('steam-avatar'))e.target.hidden=true;},true);
 $('zoomIn').addEventListener('click',()=>{scale=Math.min(4,scale*1.2);});$('zoomOut').addEventListener('click',()=>{scale=Math.max(.6,scale/1.2);});
 $('resetView').addEventListener('click',()=>{scale=1;panX=panY=0;});
 radar.addEventListener('wheel',e=>{e.preventDefault();let old=scale,newScale=Math.min(4,Math.max(.6,scale*(e.deltaY<0?1.14:1/1.14)));let b=radar.getBoundingClientRect(),mx=e.clientX-b.left-rect.width/2,my=e.clientY-b.top-rect.height/2;

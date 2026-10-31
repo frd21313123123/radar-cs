@@ -626,6 +626,7 @@ impl CS2Reader {
         let scene_off=field(s,"C_BaseEntity","m_pGameSceneNode")?;
         let abs_off=field(s,"CGameSceneNode","m_vecAbsOrigin")?;
         let name_off=s.field("CBasePlayerController","m_iszPlayerName");
+        let steam_off=s.field("CBasePlayerController","m_steamID");
         let reverse_off=s.field("C_BasePlayerPawn","m_hController");
         let yaw_off=s.field("C_CSPlayerPawn","m_angEyeAngles");
         let money_off=s.field("CCSPlayerController","m_pInGameMoneyServices");
@@ -730,6 +731,7 @@ impl CS2Reader {
             }
             if is_local {if let Some(m)=local_motion.as_mut(){if weapon!="—"{m.weapon=Some(weapon.clone());}}}
             let entry=Player{id:slot,name:if name.is_empty(){if is_local{"Вы".into()}else{format!("Player {slot}")}}else{name},
+                steam_id:steam_off.and_then(|off|try_u64(p,ctl+off)).and_then(crate::avatars::steam_id64),
                 team,local:is_local,health:hp.filter(|n|(0..=200).contains(n)),life_state:life.into(),health_verified:life=="alive",
                 armor,helmet,defuser,money,position:xyz,yaw,weapon,inventory,has_c4,c4_source:None,
                 is_flashed:if life=="alive"{self.flash_state(p,pawn)}else{Some(false)},
@@ -1034,7 +1036,7 @@ mod bomb_read_tests {
   let off=json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16,"dwGlobalVars":24,"dwLocalPlayerPawn":32}});
   let cls=json!({"client.dll":{"classes":{
    "CCSPlayerController":{"fields":{"m_hPlayerPawn":32,"m_bPawnIsAlive":36}},
-   "CBasePlayerController":{"fields":{"m_nTickBase":48}},
+   "CBasePlayerController":{"fields":{"m_nTickBase":48,"m_steamID":64}},
    "C_BaseEntity":{"fields":{"m_iTeamNum":16,"m_iHealth":20,"m_pGameSceneNode":40}},
    "CGameSceneNode":{"fields":{"m_vecAbsOrigin":16}}
   }}});
@@ -1050,6 +1052,20 @@ mod bomb_read_tests {
  fn initial()->FakeMemory{
   let mut p=FakeMemory::new();p.put(BASE+8,&LIST.to_le_bytes());p.put(BASE+16,&CTL.to_le_bytes());p.put(BASE+24,&0u64.to_le_bytes());p.put(BASE+32,&PAWN.to_le_bytes());
   put_actor(&mut p,LIST,BLOCK,CTL,PAWN,NODE,3,120);p
+ }
+ #[test]fn steam_identity_is_exact_and_updates_when_a_controller_slot_is_reused(){
+  let mut r=reader();let mut p=initial();
+  for id in [76561197960287930u64,76561198000000001]{
+   p.put(CTL+64,&id.to_le_bytes());
+   let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();
+   assert_eq!(s.players.len(),1);
+   assert_eq!(s.players[0].steam_id,Some(id.to_string()));
+   assert_eq!(serde_json::to_value(&s).unwrap()["players"][0]["steam_id"],id.to_string());
+  }
+  p.put(CTL+64,&0u64.to_le_bytes());
+  assert!(r.snapshot(&mut p,BASE,0,1,true,false).unwrap().players[0].steam_id.is_none());
+  p.mem.remove(&(CTL+64));
+  assert!(r.snapshot(&mut p,BASE,0,1,false,false).unwrap().players[0].steam_id.is_none());
  }
  #[test]fn missing_map_is_recovered_even_when_controller_clock_works(){
   let mut r=reader();let mut p=initial();let s=r.snapshot(&mut p,BASE,0,1,false,false).unwrap();

@@ -2,7 +2,13 @@
 
 `bomb_ground.png` is the existing bundled C4 marker.
 
-`agents.json` maps pawn model names to agent portraits. Metadata is a compact
+Player cards use Steam profile avatars, resolved by SteamID64 through Steam's
+public profile XML without an API key. Images are cached locally as
+`steam_avatar_<steamid>.img` and remain available offline. Profiles are refreshed
+after 24 hours; failures retain an existing avatar or show a neutral silhouette.
+
+`agents.json` maps pawn model names to agent portraits for the legacy
+`/api/agent-icon` endpoint. Player cards do not use these portraits. Metadata is a compact
 extract of [ByMykel/CSGO-API agents.json](https://github.com/ByMykel/CSGO-API/blob/main/public/api/en/agents.json)
 (MIT). Character artwork is owned by Valve and is fetched from the Valve Steam
 CDN only when a matching model is known. The server caches PNGs locally. Unknown

@@ -81,6 +81,19 @@ def main():
             assert token.encode() not in body, "Access-help page leaked the token"
             print("PASS: duplicate startup reuses the correct link; API stays authenticated; icons cache and live data does not")
 
+            avatar = (root / "assets/bomb_ground.png").read_bytes()
+            (work / "cache/steam_avatar_76561197960287930.img").write_bytes(avatar)
+            status, headers, body = request(port, "/api/steam-avatar?steam_id=76561197960287930", token)
+            assert status == 200 and headers["Content-Type"] == "image/png" and body == avatar
+            assert headers["Cache-Control"] == "private, max-age=86400"
+            for steam_id in ("76561198000000001", "0", "..%2F..%2Fetc%2Fpasswd"):
+                status, headers, body = request(port, f"/api/steam-avatar?steam_id={steam_id}", token)
+                assert status == 200 and headers["Content-Type"] == "image/svg+xml"
+                assert "Аватар Steam недоступен" in body.decode("utf-8")
+                assert headers["Cache-Control"] == "private, max-age=30"
+            assert request(port, "/api/steam-avatar?steam_id=76561197960287930")[0] == 403
+            print("PASS: Steam avatars load from the offline cache; missing avatars use a neutral fallback")
+
             process.terminate()
             process.wait(timeout=10)
             process, restored = start("restart.log")

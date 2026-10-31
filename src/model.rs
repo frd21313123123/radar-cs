@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Player {
     pub id: u32,
     pub name: String,
+    /// Decimal SteamID64; a string preserves all digits in browser clients.
+    #[serde(default)] pub steam_id: Option<String>,
     pub team: u8,
     pub local: bool,
     pub health: Option<i32>,
@@ -261,7 +263,7 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
         let dead=i==2;
         let mut inventory=vec![weapon.to_string(), (if team==2 {"Glock-18"} else {"USP-S"}).into(),"Flashbang".into(),"Smoke".into()];
         if i==1 {inventory.push("C4".into());}
-        players.push(Player {id:i as u32+1,name:name.to_owned(),team,local:i==6,
+        players.push(Player {id:i as u32+1,name:name.to_owned(),steam_id:None,team,local:i==6,
             health:Some(if dead {0} else {100-8*(i as i32%3)}),
             life_state:if dead {"dead"} else {"alive"}.into(),health_verified:!dead,
             armor:if i%2==1 {100} else {50},helmet:i%2==1,defuser:false,money:Some(2500+i as i32*700),
@@ -312,7 +314,7 @@ mod tests {
         let mut old=serde_json::to_value(demo_snapshot(0.)).unwrap();
         for player in old["players"].as_array_mut().unwrap(){
             let player=player.as_object_mut().unwrap();
-            for field in ["is_flashed","flash_remaining_secs","agent_model"]{player.remove(field);}
+            for field in ["is_flashed","flash_remaining_secs","agent_model","steam_id"]{player.remove(field);}
         }
         for grenade in old["grenades"].as_array_mut().unwrap(){
             let grenade=grenade.as_object_mut().unwrap();
@@ -320,6 +322,7 @@ mod tests {
         }
         let decoded:Snapshot=serde_json::from_value(old).unwrap();
         assert!(decoded.players[0].is_flashed.is_none());
+        assert!(decoded.players[0].steam_id.is_none());
         assert!(decoded.grenades[0].remaining_secs.is_none());
         assert!(!decoded.grenades[0].timer_estimated);
     }

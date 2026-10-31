@@ -1,7 +1,7 @@
 //! Minimal bounded local HTTP server; requests carry a random bearer token.
 use std::{io::{Read,Write},net::{TcpListener,TcpStream,SocketAddr},path::PathBuf,sync::{Arc,Mutex},time::Duration};
 use serde_json::{Value,json};
-use crate::{assets,icons,gsi,state::SharedState,overlay::OverlayController};
+use crate::{assets,avatars,icons,gsi,state::SharedState,overlay::OverlayController};
 
 pub struct HttpServer {
     pub bind:String,pub port:u16,pub token:String,pub gsi_token:String,
@@ -164,6 +164,13 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
         "/api/weapon-icon"=>{
             let name=query_value(query,"weapon").unwrap_or_default();
             respond_cached(&mut stream,200,icons::weapon_icon(&name).as_bytes(),"image/svg+xml","private, max-age=86400")
+        }
+        "/api/steam-avatar"=>{
+            let id=query_value(query,"steam_id").unwrap_or_default();
+            match avatars::steam_avatar(&id,&server.cache,server.offline){
+                Some(avatar)=>respond_cached(&mut stream,200,&avatar.bytes,avatar.content_type,"private, max-age=86400"),
+                None=>respond_cached(&mut stream,200,avatars::NEUTRAL_AVATAR.as_bytes(),"image/svg+xml","private, max-age=30"),
+            }
         }
         "/api/agent-icon"=>{
             let model=query_value(query,"model").unwrap_or_default();
