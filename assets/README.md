@@ -17,6 +17,10 @@ silhouette; this is not the player's Steam profile avatar.
 
 Equipment icons are local SVG silhouettes in `src/icons.rs` and work offline.
 
+IBM Plex Mono and IBM Plex Sans Condensed are embedded as subset WOFF fonts in
+`web/index.html`, so the dashboard does not contact a font CDN. Their SIL Open
+Font License notices are in `ibmplexmono-OFL.txt` and `ibmplexsanscondensed-OFL.txt`.
+
 `schema-bundle.json` is a complete fallback for first launch without network
 access. Its offsets, client schema and build information were fetched together
 from [a2x/cs2-dumper revision 1005c258412a3657ac73ed1a9f84b9cbedddd876](https://github.com/a2x/cs2-dumper/tree/1005c258412a3657ac73ed1a9f84b9cbedddd876/output)

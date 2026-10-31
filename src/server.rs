@@ -29,7 +29,7 @@ fn respond(stream:&mut TcpStream,status:u16,body:&[u8],ctype:&str)->std::io::Res
 }
 fn respond_cached(stream:&mut TcpStream,status:u16,body:&[u8],ctype:&str,cache:&str)->std::io::Result<()> {
     let status_text=match status{200=>"OK",400=>"Bad Request",403=>"Forbidden",404=>"Not Found",413=>"Payload Too Large",502=>"Bad Gateway",_=>"Error"};
-    let header=format!("HTTP/1.1 {status} {status_text}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: {cache}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n\r\n",body.len());
+    let header=format!("HTTP/1.1 {status} {status_text}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: {cache}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'\r\n\r\n",body.len());
     stream.write_all(header.as_bytes())?;stream.write_all(body)
 }
 fn reply_json(stream:&mut TcpStream,status:u16,v:Value)->std::io::Result<()>{let bytes=v.to_string();respond(stream,status,bytes.as_bytes(),"application/json; charset=utf-8")}

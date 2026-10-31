@@ -1,6 +1,7 @@
 """Sound-wave and settings checks used by browser-smoke.py."""
 import time
 from copy import deepcopy
+from browser_ui import check_all_native_fields
 
 
 def check_steam_avatars(page):
@@ -41,16 +42,20 @@ def check_steam_avatars(page):
 
 
 def check_noise(page):
+    page.bring_to_front()
     page.locator("#layerSelect").select_option("default")
     state = page.evaluate("JSON.parse(JSON.stringify(snapshot))")
     local = next(player for player in state["players"] if player["local"])
     origin = [local["position"][0] - 150, local["position"][1] + 180, local["position"][2]]
-    started = time.monotonic()
+    started = None
 
     def sound_state(route):
+        nonlocal started
+        if started is None:
+            started = time.monotonic()
         age = int((time.monotonic() - started) * 1000)
         value = deepcopy(state)
-        value.update(time=time.time(), status="live", grenades=[], noise=None)
+        value.update(time=time.time(), age_secs=0, status="live", grenades=[], noise=None)
         value["noise_events"] = [] if age >= 2000 else [{
             "event_id": 900001, "kind": "footstep", "position": origin,
             "radius_units": 1100, "age_ms": age, "duration_ms": 2000, "approximate": True,
@@ -58,21 +63,23 @@ def check_noise(page):
         next(player for player in value["players"] if player["local"])["position"][0] += age / 4
         route.fulfill(json=value)
 
-    page.route("**/api/state?*", sound_state)
-    page.wait_for_function("() => snapshot.noise_events?.some(n=>n.event_id===900001)")
-    page.evaluate("""() => {
+    page.evaluate("""origin => {
         window.auditNoise=[];window.auditNoiseLabels=[];
+        window.auditNoiseOrigin=origin;
         window.auditOriginalArc=ctx.arc;window.auditOriginalText=ctx.fillText;
         ctx.arc=function(x,y,r,...rest){
-            if(ctx.lineWidth===2&&ctx.strokeStyle===prefs.noiseColor.toLowerCase())window.auditNoise.push({x,y,r,alpha:ctx.globalAlpha});
+            const origin=xy(window.auditNoiseOrigin);
+            if(ctx.lineWidth===2&&ctx.strokeStyle===prefs.noiseColor.toLowerCase()&&Math.hypot(x-origin.x,y-origin.y)<.1)window.auditNoise.push({x,y,r,alpha:ctx.globalAlpha});
             return window.auditOriginalArc.call(ctx,x,y,r,...rest);
         };
         ctx.fillText=function(text,...rest){
             if(String(text).includes('28 м'))window.auditNoiseLabels.push(text);
             return window.auditOriginalText.call(ctx,text,...rest);
         };
-    }""")
+    }""", origin)
+    page.route("**/api/state?*", sound_state)
     try:
+        page.wait_for_function("() => snapshot.noise_events?.some(n=>n.event_id===900001)")
         page.wait_for_function("() => window.auditNoise.length>2")
         page.wait_for_timeout(300)
         samples = page.evaluate("window.auditNoise")
@@ -137,12 +144,12 @@ def check_settings(page, screenshots=None):
         assert saved["show_names"] and saved["show_armor"] and saved["show_hp_bar"] and saved["show_weapon_name"]
         page.locator("#nativeHP").uncheck()
         saved_ui()
-        page.locator("#nativeSectionSelect").select_option("objects")
+        page.locator('[data-native-section="objects"]').click()
         assert page.locator("#nativeOpacity").is_visible()
         page.locator("#nativeUtilityTimers").uncheck()
         saved_ui()
         assert not saved["show_utility_timers"]
-        page.locator("#nativeSectionSelect").select_option("window")
+        page.locator('[data-native-section="window"]').click()
         assert page.locator("#nativeOpacity").is_visible()
         page.locator("#nativeMaxFps").evaluate("element=>{element.value='15';element.dispatchEvent(new Event('change',{bubbles:true}));}")
         saved_ui()
@@ -173,7 +180,7 @@ def check_settings(page, screenshots=None):
         page.locator("#settingsTabMini").click()
         assert page.locator("#nativeOpacity").input_value() == "43", "Transparency was not restored after reload"
         assert page.locator("#nativeOpacityLabel").inner_text() == "43%"
-        page.locator("#nativeSectionSelect").select_option("window")
+        page.locator('[data-native-section="window"]').click()
         page.locator("#resetSettings").click()
         saved_ui()
         assert saved["opacity"] == defaults["opacity"] and saved["zoom"] == defaults["zoom"]
@@ -181,9 +188,10 @@ def check_settings(page, screenshots=None):
         assert not saved["show_hp"], "Window reset changed player settings"
         assert page.locator("#nativeOpacityLabel").inner_text() == "0%"
         set_transparency(43)
-        page.locator("#nativeSectionSelect").select_option("players")
+        page.locator('[data-native-section="players"]').click()
         assert not page.locator("#nativeHP").is_checked()
         assert page.locator("#nativeNames").is_checked()
+        check_all_native_fields(page, saved)
         if screenshots:
             screenshots.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(screenshots / "mini-settings-desktop.png"))

@@ -17,6 +17,7 @@ from threading import Thread
 
 from playwright.sync_api import sync_playwright
 from browser_features import check_steam_avatars, check_noise, check_settings, check_bomb_age, check_render_budget
+from browser_ui import check_dashboard, check_preferences, check_responsive_offline
 
 
 class StalledJSON(BaseHTTPRequestHandler):
@@ -170,6 +171,9 @@ def check_browser(url, executable, screenshots=None):
             check_noise(a)
             check_settings(a, screenshots)
             check_bomb_age(a)
+            check_dashboard(a)
+            check_preferences(a)
+            check_responsive_offline(browser, url, screenshots)
             check_render_budget(browser, url)
             assert not errors, errors
             print("PASS: no browser JavaScript errors")

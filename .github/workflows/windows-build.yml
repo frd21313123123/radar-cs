@@ -73,9 +73,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'dist/web' | Out-Null
           Copy-Item $exe 'dist/cas-external-radar.exe'
           Copy-Item 'web/index.html','web/access.html' 'dist/web/'
-          Copy-Item 'README.md','LICENSE','start_windows.bat' 'dist/'
+          Copy-Item 'README.md','LICENSE','start_windows.bat','start_demo.bat' 'dist/'
           New-Item -ItemType Directory -Force -Path 'dist/assets' | Out-Null
-          Copy-Item 'assets/sound_profiles.md','assets/schema_LICENSE.txt','assets/README.md' 'dist/assets/'
+          Copy-Item 'assets/sound_profiles.md','assets/schema_LICENSE.txt','assets/README.md','assets/ibmplexmono-OFL.txt','assets/ibmplexsanscondensed-OFL.txt' 'dist/assets/'
           Compress-Archive -Path 'dist/*' -DestinationPath 'CAS-Radar-Windows-x64.zip' -Force
           $sha = (Get-FileHash 'dist/cas-external-radar.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
           "${sha}  cas-external-radar.exe" | Set-Content -Encoding ascii 'cas-external-radar.exe.sha256'

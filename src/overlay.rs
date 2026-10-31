@@ -162,9 +162,9 @@ impl Default for OverlaySettings {
         show_hp:true,show_hp_bar:true,show_weapon_icon:true,show_weapon_name:true,show_names:false,show_armor:false,
         show_height:true,show_flashed:true,show_c4:true,show_direction:true,show_allies:true,show_enemies:true,
         show_self:true,show_offscreen:true,show_utility_timers:true,noise_animation:true,noise_show_range:true,
-        noise_opacity:75,noise_color:"#f2c477".into(),marker_scale:1.,text_size:13,
-        zoom:1.0,max_fps:30,opacity:100,friend_color:"#3b82f6".into(),
-        enemy_color:"#ef4444".into(),self_color:"#22c55e".into()}}
+        noise_opacity:75,noise_color:"#ffc04d".into(),marker_scale:1.,text_size:13,
+        zoom:1.0,max_fps:30,opacity:100,friend_color:"#54b8ff".into(),
+        enemy_color:"#ffc04d".into(),self_color:"#d2f24a".into()}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
@@ -415,6 +415,14 @@ mod win {
             if !created.is_null(){fonts.insert((height,weight),created);}created
         })
     }
+    unsafe fn chrome_text(dc:HDC,x:i32,y:i32,text:&str,size:i32,weight:i32,color:u32,center:bool){
+        let face=font(-size,weight);if face.is_null(){return;}
+        let previous=SelectObject(dc,face);let value=wide(text);let len=(value.len()-1) as i32;
+        let mut extent=Point::default();
+        if center{GetTextExtentPoint32W(dc,value.as_ptr(),len,&mut extent);}
+        SetTextColor(dc,((color&0xff)<<16)|(color&0xff00)|((color>>16)&0xff));
+        TextOutW(dc,x-if center{extent.x/2}else{0},y,value.as_ptr(),len);SelectObject(dc,previous);
+    }
     fn brush(g:*mut c_void,color:u32)->*mut c_void {let mut b=null_mut();unsafe{GdipCreateSolidFill(color,&mut b);}let _=g;b}
     fn fill_circle(g:*mut c_void,x:i32,y:i32,r:i32,color:u32){unsafe{let b=brush(g,color);if !b.is_null(){GdipFillEllipseI(g,b,x-r,y-r,2*r,2*r);GdipDeleteBrush(b);}}}
     fn triangle(g:*mut c_void,x:f32,y:f32,angle:f32,color:u32,scale:f32){
@@ -423,6 +431,25 @@ mod win {
             Point{x:(x-dx*6.*scale+side.0*6.*scale) as i32,y:(y-dy*6.*scale+side.1*6.*scale) as i32},
             Point{x:(x-dx*6.*scale-side.0*6.*scale) as i32,y:(y-dy*6.*scale-side.1*6.*scale) as i32}];
         unsafe{let b=brush(g,color);if !b.is_null(){GdipFillPolygonI(g,b,points.as_ptr(),3,0);GdipDeleteBrush(b);}}
+    }
+    fn player_marker(g:*mut c_void,x:f32,y:f32,yaw:Option<f32>,color:u32,scale:f32,local:bool,enemy:bool){
+        if let Some(angle)=yaw{
+            let (dx,dy)=(angle.cos(),-angle.sin());let side=(-dy,dx);
+            let points=[Point{x:x as i32,y:y as i32},
+                Point{x:(x+(dx*40.+side.0*19.)*scale) as i32,y:(y+(dy*40.+side.1*19.)*scale) as i32},
+                Point{x:(x+(dx*40.-side.0*19.)*scale) as i32,y:(y+(dy*40.-side.1*19.)*scale) as i32}];
+            unsafe{let b=brush(g,(color&0x00ffffff)|0x30000000);if !b.is_null(){GdipFillPolygonI(g,b,points.as_ptr(),3,0);GdipDeleteBrush(b);}}
+        }
+        if enemy{
+            let r=9.*scale;
+            let points=[Point{x:x as i32,y:(y-r) as i32},Point{x:(x+r) as i32,y:y as i32},Point{x:x as i32,y:(y+r) as i32},Point{x:(x-r) as i32,y:y as i32}];
+            unsafe{let b=brush(g,color);if !b.is_null(){GdipFillPolygonI(g,b,points.as_ptr(),4,0);GdipDeleteBrush(b);}}
+        }else{fill_circle(g,x as i32,y as i32,(7.*scale).round() as i32,if local{0xfff4f8f0}else{color});}
+        fill_circle(g,x as i32,y as i32,(2.5*scale).round().max(1.) as i32,0xff090c0e);
+        if local{unsafe{
+            let mut pen=null_mut();let r=(13.*scale).round() as i32;
+            if GdipCreatePen1(color,2.,2,&mut pen)==0&&!pen.is_null(){GdipDrawEllipseI(g,pen,x as i32-r,y as i32-r,2*r,2*r);GdipDeletePen(pen);}
+        }}
     }
     fn argb(hex:&str)->u32 {let rgb=u32::from_str_radix(hex.strip_prefix('#').unwrap_or("3b82f6"),16).unwrap_or(0x3b82f6);0xff000000|rgb}
     /// Download off the window's message thread. GDI+ decoding stays on the
@@ -524,21 +551,24 @@ mod win {
         });
         if !rendered {fill_circle(g,x,y,11,0xff1d1610);fill_circle(g,x,y,8,0xffffbc43);}
     }
-    /// Styled after the supplied compact CS2 panel: dark backdrop, cyan ring.
+    struct BombPanel {site:String,remaining:f32,top:i32,detailed:bool,defusing:bool,allies:String,enemies:String}
+    /// Match the dashboard's orange C4 clock, with a compact panel in small windows.
     /// Called AFTER the world transform is reset, so the panel does not rotate.
-    fn draw_bomb_panel(g:*mut c_void,remaining:f32,total:f32){
+    fn draw_bomb_panel(g:*mut c_void,panel:&BombPanel,total:f32,width:i32){
+        let remaining=panel.remaining;
         if !remaining.is_finite()||!total.is_finite()||total<=0.0{return;}
+        let (left,top,side)=if panel.detailed{(18,panel.top+14,40)}else{(18,panel.top+8,26)};
         unsafe{
-            let b=brush(g,0xf40b121b);
-            if !b.is_null(){GdipFillRectangleI(g,b,9,35,241,91);GdipDeleteBrush(b);}
+            rectangle(g,if panel.detailed{0}else{9},panel.top,if panel.detailed{width}else{112},if panel.detailed{68}else{42},0xf50f1417);
+            rectangle(g,if panel.detailed{0}else{9},panel.top,if panel.detailed{width}else{112},1,0xff33404a);
             let mut border=null_mut();
-            if GdipCreatePen1(0xff395361,1.4,2,&mut border)==0&&!border.is_null(){
-                GdipDrawEllipseI(g,border,21,53,57,57);GdipDeletePen(border);
+            if GdipCreatePen1(0xff27323a,3.5,2,&mut border)==0&&!border.is_null(){
+                GdipDrawEllipseI(g,border,left,top,side,side);GdipDeletePen(border);
             }
-            let color=if remaining<=5.0{0xffff6170}else if remaining<=10.0{0xffffb45b}else{0xff25c5ef};
+            let color=if remaining<=5.0{0xffff4d5e}else if remaining<=10.0{0xffff6b3d}else{0xffffc04d};
             let mut arc=null_mut();
-            if GdipCreatePen1(color,5.0,2,&mut arc)==0&&!arc.is_null(){
-                GdipDrawArcI(g,arc,21,53,57,57,-90.0,360.0*(remaining/total).clamp(0.0,1.0));
+            if GdipCreatePen1(color,3.5,2,&mut arc)==0&&!arc.is_null(){
+                GdipDrawArcI(g,arc,left,top,side,side,-90.0,360.0*(remaining/total).clamp(0.0,1.0));
                 GdipDeletePen(arc);
             }
         }
@@ -598,7 +628,8 @@ mod win {
         let game_map=snap.game_map.clone();
         let mapdata=&map_entry["radar_info"];
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
-        unsafe{GdipGraphicsClear(g,0xff10171d);}
+        unsafe{GdipGraphicsClear(g,0xff090c0e);}
+        let detailed_chrome=width>=350&&height>=350&&(cfg.show_names||cfg.show_hp_bar||cfg.show_weapon_name||cfg.show_armor);
         let focus=snap.radar_focus(cfg.follow_spectator);
         let layer=assets::map_layer_for_height(mapdata,focus.as_ref().map(|p|p.position[2]));
         let mut background_notice=if game_map.is_empty(){Some("Карта не определена. Выберите её на основной карте.")}
@@ -766,7 +797,8 @@ mod win {
         for p in &snap.players {
             if !cfg.player_visible(p,snap.local_team){continue;}
             let raw=match screen_point(p.position,(pos_x,pos_y,scale),width as f32,height as f32,cfg.zoom,center){Some(v)=>v,None=>continue};
-            let (top_padding,bottom_padding)=cfg.marker_padding();
+            let (top_padding,mut bottom_padding)=cfg.marker_padding();
+            if detailed_chrome&&cfg.show_bomb_timer&&snap.bomb_timer.is_some(){bottom_padding=bottom_padding.max(78.);}
             let (x,y,edge)=match marker_point_padded(raw,width as f32,height as f32,camera_angle.unwrap_or(0.),top_padding,bottom_padding){Some(v)=>v,None=>continue};
             if edge&&!cfg.show_offscreen{continue;}
             let col=if p.local {argb(&cfg.self_color)}else if p.team==snap.local_team {argb(&cfg.friend_color)}else {argb(&cfg.enemy_color)};
@@ -777,7 +809,8 @@ mod win {
                 let (dx,dy)=(raw.0-width as f32/2.,raw.1-height as f32/2.);
                 Some((-(dx*sin+dy*cos)).atan2(dx*cos-dy*sin))
             }else if cfg.show_direction{p.yaw.map(|yaw|(yaw-camera_angle.unwrap_or(0.)).to_radians())}else{None};
-            if let Some(yaw)=yaw{triangle(g,x,y,yaw,col,cfg.marker_scale);}else{fill_circle(g,x as i32,y as i32,(6.*cfg.marker_scale).round() as i32,col);}
+            if edge{if let Some(yaw)=yaw{triangle(g,x,y,yaw,col,cfg.marker_scale);}}
+            else{player_marker(g,x,y,yaw,col,cfg.marker_scale,p.local,!p.local&&p.team!=snap.local_team);}
             if cfg.show_names{label(x,y-radius-cfg.text_size as f32-5.,p.name.chars().take(24).collect(),0xfff0f6fc);}
             else if edge{label(x,y-radius-cfg.text_size as f32-5.,"ЗА КРАЕМ".into(),0xffc7d9e6);}
             if cfg.show_c4&&Some(p.id)==snap.bomb_carrier_id {fill_circle(g,(x-radius-7.) as i32,(y-radius-5.) as i32,4,0xffffcb70);}
@@ -788,7 +821,7 @@ mod win {
             let mut row=y+radius+3.;
             if cfg.show_hp_bar{
                 rectangle(g,x as i32-17,row as i32,34,4,0xff15202b);
-                if let Some(hp)=p.health{rectangle(g,x as i32-17,row as i32,(34.*(hp as f32/100.).clamp(0.,1.)) as i32,4,if hp<=30{0xffff7373}else{0xff80e5b2});}
+                if let Some(hp)=p.health{rectangle(g,x as i32-17,row as i32,(34.*(hp as f32/100.).clamp(0.,1.)) as i32,4,if hp<=30{0xffff4d5e}else{0xffd2f24a});}
                 row+=6.;
             }
             if cfg.show_hp{label(x,row,p.health.map(|hp|format!("{hp} ХП")).unwrap_or_else(||"? ХП".into()),0xfff4f8fc);row+=cfg.text_size as f32+2.;}
@@ -800,19 +833,31 @@ mod win {
         }
         } // Valid overview: unknown maps never use another map's geometry.
         // Custom chrome is drawn last and never rotates with the map.
-        rectangle(g,0,0,width,34,0xf5101822);
-        rectangle(g,width-40,4,34,30,0xff34232c);
-        segments(g,&[(width-29,13,width-17,25),(width-17,13,width-29,25)],0xffffdce3,2.);
+        rectangle(g,0,0,width,34,0xf50f1417);
+        rectangle(g,0,33,width,1,0xff222b30);
+        rectangle(g,0,0,1,height,0xff33404a);rectangle(g,width-1,0,1,height,0xff33404a);
+        rectangle(g,0,height-1,width,1,0xff33404a);
+        fill_circle(g,17,17,8,0xff82952d);fill_circle(g,17,17,6,0xff0f1417);
+        segments(g,&[(17,17,22,12)],0xffd2f24a,1.5);
+        for x in (width-84..width-52).step_by(6){fill_circle(g,x,17,1,0xff33404a);}
+        segments(g,&[(width-28,12,width-18,22),(width-18,12,width-28,22)],0xff93a0a8,1.5);
         let bomb_lines=if cfg.show_bomb_timer{
             snap.bomb_timer.as_ref().and_then(|timer|{
                 let remaining=countdown_remaining(timer.remaining_secs,snap.time,crate::model::now_secs())?;
-                draw_bomb_panel(g,remaining,timer.total_secs);
-                Some([format!("Плэнт: {}",timer.site.as_deref().unwrap_or("?")),
-                    format!("{remaining:.1} сек")])
+                let count=|allies:bool|{
+                    let team:Vec<_>=snap.players.iter().filter(|p|if allies{p.team==snap.local_team}else{p.team!=snap.local_team}).collect();
+                    format!("{} {}/{}",if allies{"СОЮЗ"}else{"ВРАГ"},team.iter().filter(|p|p.life_state=="alive").count(),team.len())
+                };
+                let panel=BombPanel{site:timer.site.clone().unwrap_or_else(||"?".into()),remaining,
+                    top:if detailed_chrome{height-68}else{43},detailed:detailed_chrome,defusing:timer.being_defused,
+                    allies:count(true),enemies:count(false)};
+                draw_bomb_panel(g,&panel,timer.total_secs,width);
+                Some(panel)
             })
         }else{None};
         let has_bomb_timer=bomb_lines.is_some();
-        BOMB_LINES.with(|s|*s.borrow_mut()=bomb_lines);
+        let notice_bottom=if bomb_lines.as_ref().is_some_and(|p|p.detailed){height-68}else{height};
+        BOMB_PANEL.with(|s|*s.borrow_mut()=bomb_lines);
         let no_player_data=reader_notice(&snap.status,snap.players.len(),snap.message.as_deref(),((width-48)/(cfg.text_size as i32*3/5).max(1)).max(16) as usize);
         if let Some(lines)=no_player_data.as_ref().filter(|_|!has_bomb_timer){
             // Below the drag strip/X, visible even when GSI already names a map.
@@ -827,42 +872,42 @@ mod win {
             }
         }
         if let Some(notice)=background_notice{
-            rectangle(g,6,height-48,width-12,43,0xee18222d);
+            rectangle(g,6,notice_bottom-48,width-12,43,0xee0f1417);
             let title=if notice.contains("загружается"){"Загрузка фона карты…"}
                 else if game_map.is_empty(){"Карта не определена"}else{"Фон карты недоступен"};
-            label(width as f32/2.,(height-45) as f32,title.into(),0xffffd7a1);
+            label(width as f32/2.,(notice_bottom-45) as f32,title.into(),0xffffc04d);
             // Short, safe local explanations; never echo remote URLs/errors.
             let (first,second)=notice.split_once(". ").unwrap_or((notice,""));
             let concise=if second.is_empty(){first}else{second};
-            label(width as f32/2.,(height-26) as f32,concise.to_owned(),0xffdbe7ef);
+            label(width as f32/2.,(notice_bottom-26) as f32,concise.to_owned(),0xffdbe7ef);
         }
         if has_bomb_timer&&background_notice.is_none(){
             if let Some(lines)=no_player_data.as_ref(){
                 // Keep the validated clock above and a concise reader cause
                 // below it, including at the minimum 295x205 window size.
-                rectangle(g,6,height-48,width-12,43,0xee18222d);
+                rectangle(g,6,notice_bottom-48,width-12,43,0xee0f1417);
                 for (i,line) in lines.iter().skip(1).take(2).enumerate(){
-                    label(width as f32/2.,(height-45+i as i32*19) as f32,line.clone(),0xffffd7a1);
+                    label(width as f32/2.,(notice_bottom-45+i as i32*19) as f32,line.clone(),0xffffc04d);
                 }
             }
         }
         // Native GDI text is drawn outside of GDI+ to avoid mixed HDC ownership.
-        let mut text=if game_map.is_empty(){"CAS MINI • WAITING FOR MAP".to_owned()}else{format!("CAS MINI  •  {} / {}",game_map.to_uppercase(),if layer=="lower"{"НИЖНИЙ"}else{"ВЕРХНИЙ"})};
+        let mut text=if game_map.is_empty(){"CAS RADAR · ОЖИДАНИЕ КАРТЫ".to_owned()}else{format!("CAS RADAR · {} / {}",game_map.to_uppercase(),if layer=="lower"{"НИЗ"}else{"ВЕРХ"})};
         if cfg.follow_spectator {
             if let Some(target)=focus.as_ref().filter(|p|p.spectating){
                 let short:String=target.name.chars().take(12).collect();
                 text.push_str(&format!(" | OBS: {short}"));
             }
         }
-        if no_player_data.is_some(){text=if snap.status=="stale"{"CAS MINI  •  НЕТ ОБНОВЛЕНИЙ"}else{"CAS MINI  •  НЕТ ДАННЫХ ИГРОКОВ"}.into();}
+        if no_player_data.is_some(){text=if snap.status=="stale"{"CAS RADAR · НЕТ ОБНОВЛЕНИЙ"}else{"CAS RADAR · НЕТ ДАННЫХ ИГРОКОВ"}.into();}
         // Leave room for the independent close control at every window size.
-        let max_chars=((width-62)/7).max(4) as usize;
+        let max_chars=((width-96)/7).max(4) as usize;
         text=text.chars().take(max_chars).collect();
         let _=dc;
         STATUS.with(|s|{*s.borrow_mut()=text;});
     }
     thread_local!{static STATUS:RefCell<String>=const{RefCell::new(String::new())};}
-    thread_local!{static BOMB_LINES:RefCell<Option<[String;2]>>=const{RefCell::new(None)};}
+    thread_local!{static BOMB_PANEL:RefCell<Option<BombPanel>>=const{RefCell::new(None)};}
     unsafe fn update_window(hwnd:HWND){
         let bridge=match GLOBAL.get(){Some(b)=>b,None=>return};
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
@@ -972,31 +1017,25 @@ mod win {
                                 loop {
                                     let t=wide(&title);let mut size=Point::default();
                                     GetTextExtentPoint32W(mem,t.as_ptr(),(t.len()-1) as i32,&mut size);
-                                    if size.x<=(w-65).max(0)||title.is_empty(){
-                                        if t.len()>1{TextOutW(mem,12,8,t.as_ptr(),(t.len()-1) as i32);}break;
+                                    if size.x<=(w-126).max(0)||title.is_empty(){
+                                        if t.len()>1{chrome_text(mem,34,9,&title,11,650,0xffe9eef0,false);}break;
                                     }
                                     title.pop();
                                 }
                             });
-                            BOMB_LINES.with(|data|{
-                                if let Some(lines)=data.borrow().as_ref(){
-                                    let face_bold=font(-21,700);
-                                    let face_small=font(-16,500);
-                                    SetTextColor(mem,0x00dbe8f4);
-                                    if !face_small.is_null(){
-                                        let old=SelectObject(mem,face_small);
-                                        let t=wide(&lines[0]);TextOutW(mem,95,57,t.as_ptr(),(t.len()-1) as i32);
-                                        SelectObject(mem,old);
+                            BOMB_PANEL.with(|data|{
+                                if let Some(panel)=data.borrow().as_ref(){
+                                    let color=if panel.remaining<=5.{0xffff4d5e}else if panel.remaining<=10.{0xffff6b3d}else{0xffffc04d};
+                                    if panel.detailed{
+                                        chrome_text(mem,38,panel.top+24,&panel.site,20,700,0xffe9eef0,true);
+                                        chrome_text(mem,76,panel.top+10,if panel.defusing{"РАЗМИНИРОВАНИЕ"}else{"C4 ЗАЛОЖЕНА"},10,500,0xffffb1b9,false);
+                                        chrome_text(mem,76,panel.top+25,&format!("{:04.1}",panel.remaining),28,700,color,false);
+                                        chrome_text(mem,w-105,panel.top+17,&panel.allies,11,500,0xff93a0a8,false);
+                                        chrome_text(mem,w-105,panel.top+37,&panel.enemies,11,500,0xff93a0a8,false);
+                                    }else{
+                                        chrome_text(mem,31,panel.top+12,&panel.site,14,700,0xffe9eef0,true);
+                                        chrome_text(mem,55,panel.top+10,&format!("{:04.1}",panel.remaining),19,700,color,false);
                                     }
-                                    if !face_bold.is_null(){
-                                        let old=SelectObject(mem,face_bold);
-                                        SetTextColor(mem,0x00f7d5a1);
-                                        let t=wide(&lines[1]);TextOutW(mem,95,82,t.as_ptr(),(t.len()-1) as i32);
-                                        SelectObject(mem,old);
-                                    }
-                                    let center=wide("C4");
-                                    TextOutW(mem,36,72,center.as_ptr(),(center.len()-1) as i32);
-                                    SetTextColor(mem,0x00c9e5ee);
                                 }
                             });
                             // Present completed frame in a single GDI blit.
