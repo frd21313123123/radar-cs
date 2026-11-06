@@ -552,6 +552,7 @@ function diagnosis(){
    '\nНажми DIAG, чтобы скопировать подробную диагностику.';
 }
 function updateStatus(){
+ updateBombCountdown();
  if(connectionError||snapshotStale()){
    $('statusText').textContent=connectionError?'DISCONNECTED':'STALE / НЕТ ОБНОВЛЕНИЙ';
    $('statusDot').className='dot '+(connectionError?'error':'warning');

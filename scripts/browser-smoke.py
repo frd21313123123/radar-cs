@@ -141,6 +141,21 @@ def check_browser(url, executable, screenshots=None):
             assert not a.locator("#bombTimerPanel").evaluate("element=>element.hidden")
             print("PASS: utility zones and their timers use the selected Nuke floor")
 
+            # Polling can publish STALE between animation frames. The C4
+            # panel must update in that same task, before the next draw.
+            expired = a.evaluate("""() => {
+                const receivedAt=snapshotReceivedAt;
+                try {
+                    snapshotReceivedAt=performance.now()-2100;
+                    updateStatus();
+                    return {stale:snapshotStale(),hidden:$('bombTimerPanel').hidden};
+                } finally {
+                    snapshotReceivedAt=receivedAt;
+                    updateStatus();
+                }
+            }""")
+            assert expired['stale'] and expired['hidden'], 'STALE status left the C4 timer visible until the next frame'
+
             keep_fresh = False
             a.wait_for_function("() => snapshotStale()&&shown().length===0", timeout=5000)
             a.wait_for_function("() => $('statusText').textContent.startsWith('STALE')")
