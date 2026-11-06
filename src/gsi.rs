@@ -2,7 +2,7 @@ use crate::model::normalize_map_name;
 use std::{collections::HashSet,fs,path::{Path,PathBuf},process::Command};
 
 pub fn cfg_text(port:u16,secret:&str)->String{
-    format!("\"CAS Radar Map Auto\"\n{{\n \"uri\" \"http://127.0.0.1:{port}/gsi\"\n \"timeout\" \"5.0\"\n \"buffer\" \"0.1\"\n \"throttle\" \"0.5\"\n \"heartbeat\" \"1.0\"\n \"auth\" {{ \"token\" \"{secret}\" }}\n \"data\" {{ \"provider\" \"1\" \"map\" \"1\" }}\n}}\n")
+    format!("\"CAS Radar Map Auto\"\n{{\n \"uri\" \"http://127.0.0.1:{port}/gsi\"\n \"timeout\" \"5.0\"\n \"buffer\" \"0.05\"\n \"throttle\" \"0.1\"\n \"heartbeat\" \"1.0\"\n \"auth\" {{ \"token\" \"{secret}\" }}\n \"data\" {{ \"provider\" \"1\" \"map\" \"1\" \"player_id\" \"1\" \"player_match_stats\" \"1\" }}\n}}\n")
 }
 
 fn steam_roots()->Vec<PathBuf>{
@@ -46,4 +46,10 @@ pub fn install_cfg(port:u16,secret:&str,explicit:Option<&Path>)->Result<(PathBuf
 }
 pub fn gsi_map(message:&serde_json::Value)->Option<String>{normalize_map_name(message.get("map")?.get("name")?.as_str()?)}
 pub fn token_equal(a:&str,b:&str)->bool{let x=a.as_bytes();let y=b.as_bytes();let mut diff=x.len()^y.len();for i in 0..x.len().max(y.len()){diff|=(x.get(i).copied().unwrap_or(0)^y.get(i).copied().unwrap_or(0)) as usize;}diff==0}
+#[cfg(test)]
+#[test]
+fn config_requests_local_identity_and_kill_statistics(){
+    let config=cfg_text(8765,"secret");
+    for field in ["player_id","player_match_stats"]{assert!(config.contains(&format!("\"{field}\" \"1\"")));}
+}
 #[cfg(test)]mod tests{use super::*;#[test]fn gsi(){assert!(cfg_text(8765,"secret").contains("/gsi"));assert_eq!(gsi_map(&serde_json::json!({"map":{"name":"de_mirage"}})).as_deref(),Some("de_mirage"));}#[test]fn constant_time_compare(){assert!(token_equal("abc","abc"));assert!(!token_equal("ab","abc"));}}

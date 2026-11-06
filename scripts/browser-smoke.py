@@ -18,6 +18,7 @@ from threading import Thread
 from playwright.sync_api import sync_playwright
 from browser_features import check_steam_avatars, check_noise, check_settings, check_bomb_age, check_render_budget
 from browser_ui import check_dashboard, check_preferences, check_responsive_offline
+from browser_killsound import check_killsound
 
 
 class StalledJSON(BaseHTTPRequestHandler):
@@ -57,6 +58,7 @@ def check_browser(url, executable, screenshots=None):
             assert a.locator(".card-health").count() == 6
             assert a.locator(".card-inventory .equip-chip").count() > 0
             check_steam_avatars(a)
+            check_killsound(a)
 
             a.locator("#mapSelect").select_option("de_nuke")
             a.wait_for_function("() => map==='de_nuke'&&!autoMapEnabled&&!mapSelectionPending")

@@ -180,7 +180,7 @@ fn start()->Result<(),String>{
     let overlay=OverlayController::spawn(state.clone(),cache.clone(),args.offline);
     let server=HttpServer {bind:bind.into(),port:args.port,
         token:token.clone(),gsi_token,cache:root.join("cache"),offline:args.offline,
-        html:root.join("web/index.html"),state,overlay};
+        html:root.join("web/index.html"),state,overlay,killsound:cas_external_radar::killsound::KillSound::new(cache)};
     let url=format!("http://127.0.0.1:{}/?token={}",args.port,token);
     println!("\nCAS EXTERNAL RADAR — RUST / read-only / no injection\n  PC: {url}\n");
     if args.lan {println!("  LAN: replace 127.0.0.1 with your PC's LAN IPv4, keep entire token.\n  Do not forward this port to the Internet.");}

@@ -78,6 +78,17 @@ main{display:grid;grid-template-columns:260px minmax(0,1fr) 260px;min-height:0}.
     <p class="settings-note" id="nativeHelp">Отдельная мини-карта доступна в Windows. Раздел «Звук» настраивает звуковые волны.</p>
    </section>
    <section id="settingsSound" class="settings-pane" role="tabpanel" aria-labelledby="settingsTabSound" data-settings-panel="sound" hidden>
+    <fieldset><legend>Киллсаунд</legend>
+     <p class="settings-note">Ваш MP3 после убийства. Звук играет на компьютере с радаром, даже когда браузер свёрнут.</p>
+     <label class="settings-row">Включить киллсаунд<input type="checkbox" id="killSoundEnabled" disabled></label>
+     <label class="settings-row range-row"><span>Громкость<output id="killSoundVolumeLabel" for="killSoundVolume">70%</output></span><input type="range" id="killSoundVolume" data-format="percent" min="0" max="100" step="1" value="70" disabled></label>
+     <label for="killSoundFile" class="settings-note">Свой звук · MP3 до 10 МБ</label>
+     <input id="killSoundFile" type="file" accept=".mp3,audio/mpeg" style="display:block;width:100%;min-width:0;margin:8px 0;font:inherit;font-size:12px" disabled>
+     <p id="killSoundName" class="settings-note" style="overflow-wrap:anywhere">Файл не выбран</p>
+     <button id="killSoundPreview" class="small-btn" type="button" disabled>Прослушать</button>
+     <p id="killSoundStatus" class="settings-note" role="status" aria-live="polite">Проверка…</p>
+     <p class="settings-note">После обновления радара запустите его и один раз перезапустите CS2, чтобы включить новые игровые события.</p>
+    </fieldset>
     <p class="settings-note">Шумы вашего персонажа: кольца остаются в месте звука и плавно затухают. Радиус — верхняя оценка для открытого пространства; стены и перекрытия уменьшают слышимость.</p>
     <div class="sound-summary"><span>Шаги <b>≈ 28 м</b></span><span>Глушитель <b>≈ 36 м</b></span></div>
     <fieldset><legend>Основная карта</legend><label class="settings-row">Показывать шум<input type="checkbox" id="showNoise" data-pref-field="showNoise"></label><label class="settings-row">Анимация волн<input type="checkbox" id="noiseAnimation" data-pref-field="noiseAnimation"></label><label class="settings-row">Граница радиуса и метры<input type="checkbox" id="noiseRange" data-pref-field="noiseRange"></label><label class="settings-row">Цвет волн<input type="color" id="noiseColor" data-pref-field="noiseColor" value="#f2c477"></label><label class="settings-row range-row"><span>Яркость волн<output id="noiseOpacityLabel" for="noiseOpacity"></output></span><input type="range" id="noiseOpacity" data-pref-field="noiseOpacity" data-format="percent" min="10" max="100" step="5"></label></fieldset>
@@ -592,16 +603,62 @@ async function init(){loadPrefs();fit();window.addEventListener('resize',fit);
   if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>{fit();baseCacheKey='';}).observe(wrap);try{const {response:r,data}=await fetchJSON('/api/maps',{},4000);if(!r.ok)throw Error('Map list HTTP '+r.status);maps=data.maps||{};
   let keys=Object.keys(maps).filter(k=>maps[k].radar_info?.scale).sort();$('mapSelect').innerHTML='<option value="">Выберите карту…</option>'+keys.map(k=>`<option value="${safeText(k)}">${safeText(maps[k].display_name||k)}</option>`).join('');
   clearMap();
-}catch(e){setNotice('Не удалось получить список карт: '+e.message);}updateNativeSettings();poll();scheduleDraw();}
+}catch(e){setNotice('Не удалось получить список карт: '+e.message);}updateNativeSettings();updateKillSound();poll();scheduleDraw();}
 $('mapSelect').addEventListener('change',e=>{if(e.target.value)selectSharedMap(e.target.value);else $('mapSelect').value=map;});
 $('autoMapBtn').addEventListener('click',()=>{if(!autoMapEnabled)selectSharedMap(null);else if(mapKnown())selectSharedMap(map);});
 $('layerSelect').addEventListener('change',e=>{layer=e.target.value;loadMapImage();});
 $('namesBtn').addEventListener('click',()=>{showNames=!showNames;$('namesBtn').classList.toggle('active',showNames);$('namesBtn').setAttribute('aria-pressed',String(showNames));});
 let settingsTab='map',settingsFocus=null,nativeAvailable=false,nativeSettings={},nativeDefaults={},nativeRevision=0,nativePending=Promise.resolve();
+let killSound=null,killSoundBusy=false,killSoundRevision=0;
+function hydrateKillSound(){
+ const supported=Boolean(killSound?.supported),hasFile=Boolean(killSound?.has_file);
+ $('killSoundEnabled').checked=Boolean(killSound?.enabled);
+ $('killSoundEnabled').disabled=killSoundBusy||!supported||!hasFile;
+ $('killSoundVolume').value=killSound?.volume??70;settingOutput($('killSoundVolume'));
+ $('killSoundVolume').disabled=killSoundBusy||!supported;
+ $('killSoundFile').disabled=killSoundBusy||!supported;
+ $('killSoundPreview').disabled=killSoundBusy||!supported||!hasFile;
+ $('killSoundName').textContent=hasFile?'Выбран: '+killSound.name:'Файл не выбран';
+}
+async function updateKillSound(){
+ if(killSoundBusy)return;
+ const revision=killSoundRevision;
+ try{
+   const {response,data}=await fetchJSON('/api/killsound',{cache:'no-store'},4000);
+   if(killSoundBusy||revision!==killSoundRevision)return;
+   if(!response.ok)throw Error(data.error||'HTTP '+response.status);
+   killSound=data;hydrateKillSound();
+   $('killSoundStatus').textContent=!data.supported?'Воспроизведение доступно в Windows.':data.error||
+     (data.gsi_ready?'Данные об убийствах поступают из CS2.':'Ожидание данных CS2. Войдите в матч; при первом включении перезапустите игру.');
+ }catch(error){if(killSoundBusy||revision!==killSoundRevision)return;killSound=null;hydrateKillSound();$('killSoundStatus').textContent='Ошибка: '+error.message;}
+}
+async function changeKillSound(route,body,upload=false){
+ if(killSoundBusy)return;
+ const previous=killSound;++killSoundRevision;
+ if(route==='/api/killsound')killSound={...killSound,...body};
+ killSoundBusy=true;hydrateKillSound();$('killSoundStatus').textContent=upload?'Загрузка MP3…':'Сохранение…';
+ try{
+   const {response,data}=await fetchJSON(route,{method:'POST',headers:{'Content-Type':upload?'audio/mpeg':'application/json'},body:upload?body:JSON.stringify(body)},15000);
+   if(!response.ok)throw Error(data.error||'HTTP '+response.status);
+   killSound=data;$('killSoundStatus').textContent=upload?'MP3 сохранён. Включите киллсаунд и нажмите «Прослушать» для проверки.':route.endsWith('/preview')?'Звук воспроизводится.':'Сохранено';
+ }catch(error){killSound=previous;$('killSoundStatus').textContent='Ошибка: '+error.message;}
+ finally{killSoundBusy=false;hydrateKillSound();$('killSoundFile').value='';}
+}
+function saveKillSound(fields){return changeKillSound('/api/killsound',fields);}
+$('killSoundEnabled').addEventListener('change',()=>saveKillSound({enabled:$('killSoundEnabled').checked}));
+$('killSoundVolume').addEventListener('input',()=>settingOutput($('killSoundVolume')));
+$('killSoundVolume').addEventListener('change',()=>saveKillSound({volume:Number($('killSoundVolume').value)}));
+$('killSoundPreview').addEventListener('click',()=>changeKillSound('/api/killsound/preview',{}));
+$('killSoundFile').addEventListener('change',()=>{
+ const file=$('killSoundFile').files[0];if(!file)return;
+ if(!/\.mp3$/i.test(file.name)||!file.size||file.size>10*1024*1024){$('killSoundStatus').textContent='Выберите MP3 размером до 10 МБ.';$('killSoundFile').value='';return;}
+ changeKillSound('/api/killsound/file?name='+encodeURIComponent(file.name),file,true);
+});
 function selectSettingsTab(value){
  settingsTab=value;
  for(const button of document.querySelectorAll('[data-settings-tab]')){const active=button.dataset.settingsTab===value;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;}
  for(const panel of document.querySelectorAll('[data-settings-panel]'))panel.hidden=panel.dataset.settingsPanel!==value;
+ if(value==='sound')updateKillSound();
 }
 function nativeGroup(){
  const value=$('nativeSectionSelect').value;
@@ -683,6 +740,7 @@ document.addEventListener('keydown',event=>{
  }
 });
 $('resetSettings').addEventListener('click',()=>{
+ if(settingsTab==='sound'&&killSound?.supported)saveKillSound({enabled:false,volume:70});
  const scope=settingsTab==='mini'?document.querySelector('[data-native-group="'+$('nativeSectionSelect').value+'"]'):
    document.querySelector('[data-settings-panel="'+settingsTab+'"]');
  for(const input of scope.querySelectorAll('[data-pref-field]'))prefs[input.dataset.prefField]=DEFAULT_PREFS[input.dataset.prefField];

@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 def request(port, path, token=None):
@@ -80,6 +80,31 @@ def main():
             assert status == 403 and "Откройте ссылку" in body.decode("utf-8")
             assert token.encode() not in body, "Access-help page leaked the token"
             print("PASS: duplicate startup reuses the correct link; API stays authenticated; icons cache and live data does not")
+
+            gsi_token = (work / 'cache/gsi_token.txt').read_text(encoding='utf-8').strip()
+            event = {'auth': {'token': 'invalid'},
+                     'provider': {'steamid': '76561198000000001', 'timestamp': int(time.time())},
+                     'map': {'name': 'de_mirage'},
+                     'player': {'steamid': '76561198000000001', 'activity': 'playing', 'match_stats': {'kills': 4}}}
+
+            def post_gsi():
+                payload = Request(f'http://127.0.0.1:{port}/gsi', data=json.dumps(event).encode(),
+                                  headers={'Content-Type': 'application/json'})
+                try:
+                    response = urlopen(payload, timeout=4)
+                except HTTPError as error:
+                    response = error
+                with response:
+                    return response.status
+
+            assert post_gsi() == 403
+            event['auth']['token'] = gsi_token
+            assert post_gsi() == 200
+            assert json.loads(request(port, '/api/killsound', token)[2])['gsi_ready']
+            event['player']['steamid'] = '76561198000000002'
+            assert post_gsi() == 200
+            assert not json.loads(request(port, '/api/killsound', token)[2])['gsi_ready']
+            print('PASS: authenticated GSI reaches killsound tracking and excludes spectated players')
 
             avatar = (root / "assets/bomb_ground.png").read_bytes()
             (work / "cache/steam_avatar_76561197960287930.img").write_bytes(avatar)

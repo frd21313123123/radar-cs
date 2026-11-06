@@ -6,6 +6,7 @@ use crate::{assets,avatars,icons,gsi,state::SharedState,overlay::OverlayControll
 pub struct HttpServer {
     pub bind:String,pub port:u16,pub token:String,pub gsi_token:String,
     pub cache:PathBuf,pub offline:bool,pub html:PathBuf,pub state:Arc<Mutex<SharedState>>,pub overlay:OverlayController,
+    pub killsound:crate::killsound::KillSound,
 }
 impl HttpServer {
     pub fn serve(self)->Result<(),String>{
@@ -82,7 +83,39 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             if value.get("map")==Some(&Value::Null){state.clear_automatic_map();}
             else if let Some(name)=gsi::gsi_map(&value){state.set_map(&name,"gsi");}
         }
+        server.killsound.observe(&value);
         return reply_json(&mut stream,200,json!({"ok":true}));
+    }
+    if method=="POST" && matches!(path,"/api/killsound"|"/api/killsound/file"|"/api/killsound/preview") {
+        if query_arg(query,"token")!=Some(server.token.as_str()) {
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        let headers:Vec<(&str,&str)>=lines.filter_map(|l|l.split_once(':')).collect();
+        let ctype=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Type")).map(|(_,v)|v.trim()).unwrap_or("");
+        let upload=path=="/api/killsound/file";
+        if !(if upload {ctype=="audio/mpeg"}else{ctype.starts_with("application/json")}) {
+            return reply_json(&mut stream,400,json!({"error":"unexpected content type"}));
+        }
+        let limit=if upload{crate::killsound::MAX_MP3_BYTES}else{512};
+        let len=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Length")).and_then(|(_,v)|v.trim().parse::<usize>().ok());
+        let len=match len{Some(n) if n>0&&n<=limit=>n,_=>return reply_json(&mut stream,413,json!({"error":"Файл слишком большой или тело запроса отсутствует"}))};
+        let mut body=header[boundary..].to_vec();
+        while body.len()<len {
+            let count=stream.read(&mut buf[..(len-body.len()).min(4096)])?;if count==0{break;}
+            body.extend_from_slice(&buf[..count]);
+        }
+        if body.len()<len{return reply_json(&mut stream,400,json!({"error":"incomplete payload"}));}
+        let result=if upload {
+            let name=query_value(query,"name").unwrap_or_default();
+            server.killsound.upload(&name,&body[..len])
+        }else{
+            let value:Value=match serde_json::from_slice(&body[..len]){Ok(v)=>v,Err(_)=>return reply_json(&mut stream,400,json!({"error":"invalid JSON"}))};
+            if path=="/api/killsound/preview"{server.killsound.preview()}else{server.killsound.update(&value)}
+        };
+        return match result {
+            Ok(status)=>reply_json(&mut stream,200,status),
+            Err(error)=>reply_json(&mut stream,400,json!({"error":error})),
+        };
     }
     // Main and native maps share one explicit selection. JSON + token keeps
     // this mutation within the authenticated same-origin UI, just like overlay.
@@ -180,6 +213,7 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             }
         }
         "/api/overlay"=>reply_json(&mut stream,200,server.overlay.status()),
+        "/api/killsound"=>reply_json(&mut stream,200,server.killsound.status()),
         "/api/bomb-icon"=>respond_cached(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png","private, max-age=86400"),
         "/api/maps"=>{
             let maps=server.state.lock().map(|s|s.maps.clone()).map_err(|_|std::io::Error::other("poisoned state"))?;

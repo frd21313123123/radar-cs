@@ -3,6 +3,7 @@ pub mod avatars;
 pub mod game;
 pub mod grenade;
 pub mod gsi;
+pub mod killsound;
 pub mod model;
 pub mod noise;
 pub mod overlay;
