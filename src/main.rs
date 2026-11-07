@@ -4,15 +4,16 @@ use std::{collections::HashMap,env,fs,net::TcpListener,path::{Path,PathBuf},sync
 use cas_external_radar::session::{self,random_token};
 
 #[derive(Default)]struct Args {demo:bool,lan:bool,offline:bool,refresh:bool,no_browser:bool,no_gsi_install:bool,
-    port:u16,cfg:Option<PathBuf>}
+    port:u16,hz:u32,cfg:Option<PathBuf>}
 fn parse_args()->Result<Args,String>{
-    let mut a=Args{port:8765,..Args::default()};let mut args=env::args().skip(1);
+    let mut a=Args{port:8765,hz:30,..Args::default()};let mut args=env::args().skip(1);
     while let Some(arg)=args.next(){match arg.as_str(){
         "--demo"=>a.demo=true,"--lan"=>a.lan=true,"--offline"=>a.offline=true,"--refresh"=>a.refresh=true,
         "--no-browser"=>a.no_browser=true,"--no-gsi-install"=>a.no_gsi_install=true,
         "--port"=>a.port=args.next().ok_or("--port requires value")?.parse().map_err(|_|"bad port")?,
+        "--hz"=>a.hz=args.next().ok_or("--hz requires value")?.parse::<u32>().ok().filter(|v|(5..=120).contains(v)).ok_or("--hz must be 5..120")?,
         "--cs2-cfg"=>a.cfg=Some(PathBuf::from(args.next().ok_or("--cs2-cfg requires directory")?)),
-        "--help"|"-h"=>{println!("CAS External Radar Rust\n--demo --lan --port 8765 --offline --refresh --no-browser --no-gsi-install --cs2-cfg PATH");std::process::exit(0);}
+        "--help"|"-h"=>{println!("CAS External Radar Rust\n--demo --lan --port 8765 --offline --refresh --no-browser --no-gsi-install --hz 30 --cs2-cfg PATH");std::process::exit(0);}
         _=>return Err(format!("Unknown option {arg}")),
     }}Ok(a)
 }
@@ -20,13 +21,15 @@ fn exe_root()->PathBuf{
     let cwd=env::current_dir().unwrap_or_else(|_|PathBuf::from("."));
     if cwd.join("web/index.html").is_file(){cwd}else{env::current_exe().ok().and_then(|p|p.parent().map(Path::to_path_buf)).unwrap_or(cwd)}
 }
-fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,cache:PathBuf){
+fn reader_worker(state:Arc<Mutex<SharedState>>,schema:Option<Schema>,demo:bool,cache:PathBuf,hz:u32){
     #[cfg(windows)] unsafe {
         use windows_sys::Win32::System::Threading::{GetCurrentThread,SetThreadPriority,THREAD_PRIORITY_BELOW_NORMAL};
         // The background reader must yield CPU time to the game's main threads.
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
     }
-    let target=Duration::from_nanos(1_000_000_000/60);
+    // 30 Hz is plenty: the browser polls at ~13 Hz and the mini-map draws at <=30 fps.
+    // Every extra tick is a burst of ReadProcessMemory calls against the game process.
+    let target=Duration::from_nanos(1_000_000_000/u64::from(hz.max(1)));
     let begin=Instant::now();let mut proc=WinProcess::new();
     let mut reader=schema.map(CS2Reader::new);
     let mut tracker=BombTracker::default();
@@ -175,8 +178,8 @@ fn start()->Result<(),String>{
         }
     }
     let state=Arc::new(Mutex::new(SharedState::new(maps)));
-    let worker=state.clone();let demo=args.demo;let worker_cache=cache.clone();
-    thread::spawn(move||reader_worker(worker,schema,demo,worker_cache));
+    let worker=state.clone();let demo=args.demo;let worker_cache=cache.clone();let hz=args.hz;
+    thread::spawn(move||reader_worker(worker,schema,demo,worker_cache,hz));
     let overlay=OverlayController::spawn(state.clone(),cache.clone(),args.offline);
     let server=HttpServer {bind:bind.into(),port:args.port,
         token:token.clone(),gsi_token,cache:root.join("cache"),offline:args.offline,
