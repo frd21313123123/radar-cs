@@ -40,13 +40,47 @@ fn effect_remaining(begin_tick:Option<i32>,current:Option<f32>,lifetime:f32)->Op
 
 #[derive(Clone,Copy)] struct Layout{root:u64,chunk_offset:u64,stride:usize,confirmed:bool,slot:Option<u32>}
 impl Layout {fn new(root:u64)->Self{Self{root,chunk_offset:0x10,stride:0x78,confirmed:false,slot:None}}}
-pub struct CS2Reader {pub schema:Schema, original_schema:Schema, process:Option<(u32,u64)>,layout:Layout, layout_source:u64,layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,recovery_error:Option<&'static str>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>}
+pub struct CS2Reader {pub schema:Schema, original_schema:Schema, process:Option<(u32,u64)>,layout:Layout, layout_source:u64,layout_at:Option<Instant>, probes:u32, chunk_cache:HashMap<u32,u64>,recovery_at:Option<Instant>,recovery_error:Option<&'static str>,runtime_offsets:bool,failure_diagnostics:serde_json::Value,planted_entity:Option<u64>,
+    /// designer-name pointer -> lowercase name. Name strings are interned, so one read serves every entity of that class.
+    name_cache:HashMap<u64,String>,name_cache_at:Option<Instant>}
+const NAME_CACHE_TTL:Duration=Duration::from_secs(20);
+const NAME_CACHE_MAX:usize=4096;
 impl CS2Reader {
-    pub fn new(schema:Schema)->Self{Self{original_schema:schema.clone(),schema,process:None,layout:Layout::new(0),layout_source:0,layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,recovery_error:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None}}
+    pub fn new(schema:Schema)->Self{Self{original_schema:schema.clone(),schema,process:None,layout:Layout::new(0),layout_source:0,layout_at:None,probes:0,chunk_cache:HashMap::new(),recovery_at:None,recovery_error:None,runtime_offsets:false,failure_diagnostics:json!({}),planted_entity:None,name_cache:HashMap::new(),name_cache_at:None}}
     pub fn reset(&mut self){
         self.schema=self.original_schema.clone();self.process=None;
         self.layout=Layout::new(0);self.layout_source=0;self.layout_at=None;self.probes=0;
         self.chunk_cache.clear();self.recovery_at=None;self.recovery_error=None;self.runtime_offsets=false;self.planted_entity=None;
+        self.name_cache.clear();self.name_cache_at=None;
+    }
+    /// Designer name of an entity. `entry` is this entity's slot from the chunk that was already read
+    /// in bulk. In the Source 2 layout that slot is the CEntityIdentity itself (handle at +0x10, name
+    /// pointer at +0x20), so the name pointer comes from `entry` with no memory read; the handle's slot
+    /// number must match `index`, otherwise the layout is not what we assume and the old two-read path
+    /// is used. Names are cached by pointer and the cache is dropped every few seconds.
+    fn designer_name<M:Memory>(&mut self,p:&mut M,ptr:u64,ident_off:u64,entry:&[u8],index:u32,name_len:usize)->String{
+        if self.name_cache_at.is_none_or(|at|at.elapsed()>=NAME_CACHE_TTL)||self.name_cache.len()>NAME_CACHE_MAX{
+            self.name_cache.clear();self.name_cache_at=Some(Instant::now());
+        }
+        let inline=if entry.len()>=0x28{
+            let handle=u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
+            let name_ptr=u64::from_le_bytes(entry[0x20..0x28].try_into().unwrap());
+            if handle!=u32::MAX&&(handle&0x7fff)==index&&name_ptr>=0x10000{Some(name_ptr)}else{None}
+        }else{None};
+        let name_ptr=match inline{
+            Some(v)=>v,
+            None=>{
+                let ident=p.u64(ptr+ident_off);
+                if ident<0x10000{return String::new();}
+                p.u64(ident+0x20)
+            }
+        };
+        if name_ptr<0x10000{return String::new();}
+        if let Some(name)=self.name_cache.get(&name_ptr){return name.clone();}
+        let name=p.cstr(name_ptr,name_len).to_ascii_lowercase();
+        // Do not cache failed reads: they may succeed next frame.
+        if !name.is_empty(){self.name_cache.insert(name_ptr,name.clone());}
+        name
     }
     pub fn failure_diagnostics(&self)->serde_json::Value{self.failure_diagnostics.clone()}
     fn probe_layout<M:Memory>(&mut self,p:&mut M,list:u64,offset_addr:u64,local:u64){
@@ -241,11 +275,17 @@ impl CS2Reader {
     /// A world marker requires a real ownerless C4 entity and valid position.
     fn scan_c4<M:Memory>(&mut self,p:&mut M,list:u64,base:u64,pawns:&BTreeMap<u64,Player>)
         ->(Option<u32>,Option<BombWorld>,bool,u32) {
-        let mut candidates=Vec::new();
+        // (entity pointer, lowercase designer name). The name is resolved while the table
+        // chunk is in hand, so entities that cannot be C4 never cost another read.
+        let mut candidates:Vec<(u64,String)>=Vec::new();
         let mut seen=HashSet::new();
+        let may_be_c4=|name:&str|name.is_empty()||name.starts_with("weapon_")||name.contains("c4");
         if let Some(offset)=self.schema.offset("dwWeaponC4") {
             let ptr=p.u64(base+offset);
-            if ptr!=0 && seen.insert(ptr){candidates.push(ptr);}
+            if ptr!=0 && seen.insert(ptr){
+                let name=if ptr>=0x10000{self.designer_name(p,ptr,0x10,&[],0,48)}else{String::new()};
+                candidates.push((ptr,name));
+            }
         }
         // The high-water mark belongs to dwGameEntitySystem, which need not
         // equal the entity-list root. C4 can occupy slots above 4095.
@@ -267,7 +307,10 @@ impl CS2Reader {
                     for i in 0..count {
                         let offset=i*stride;
                         let ptr=u64::from_le_bytes(raw[offset..offset+8].try_into().unwrap());
-                        if ptr!=0 && ptr>=0x10000 && seen.insert(ptr){candidates.push(ptr);}
+                        if ptr!=0 && ptr>=0x10000 && seen.insert(ptr){
+                            let name=self.designer_name(p,ptr,0x10,&raw[offset..offset+stride],(first+i) as u32,48);
+                            if may_be_c4(&name){candidates.push((ptr,name));}
+                        }
                     }
                 }
             }
@@ -286,17 +329,10 @@ impl CS2Reader {
         let mut checked=0;
         let mut planted=HashSet::new();
         if let Some(ptr)=self.planted_pointer(p,base){planted.insert(ptr);}
-        for ptr in candidates {
+        for (ptr,entity_name) in candidates {
             let identified=self.item(p,ptr).is_some_and(|(id,_)|id==49);
-            // Item metadata can be absent for a dropped C4; identify the
-            // actual entity by Source 2's designer name instead.
-            let entity_name={
-                let ident=p.u64(ptr+0x10);
-                if ident>=0x10000{
-                    let name_ptr=p.u64(ident+0x20);
-                    if name_ptr>=0x10000{p.cstr(name_ptr,48).to_ascii_lowercase()}else{String::new()}
-                }else{String::new()}
-            };
+            // Item metadata can be absent for a dropped C4; the designer name
+            // (resolved during enumeration) identifies the actual entity instead.
             if matches!(entity_name.as_str(),"planted_c4"|"c_plantedc4"|"c_planted_c4")&&self.active_planted(p,ptr){planted.insert(ptr);}
             let is_c4=identified || matches!(entity_name.as_str(),
                 "weapon_c4"|"c_c4"|"c4"|"c_weapon_c4");
@@ -394,12 +430,10 @@ impl CS2Reader {
                     if out.len()>=60{break;}
                     let off=i*stride;let ptr=u64::from_le_bytes(raw[off..off+8].try_into().unwrap());
                     if ptr<0x10000{continue;}
-                    let ident=p.u64(ptr+ident_off);
-                    if ident<0x10000{continue;}
-                    let name_ptr=p.u64(ident+0x20);
-                    if name_ptr<0x10000{continue;}
-                    let name=p.cstr(name_ptr,64).to_ascii_lowercase();
+                    let name=self.designer_name(p,ptr,ident_off,&raw[off..off+stride],(first+i) as u32,64);
                     let kind=match Self::grenade_class(&name){Some(n)=>n,None=>continue};
+                    // Only the few matching projectiles need the identity address (for the full handle).
+                    let ident=p.u64(ptr+ident_off);
                     let node=p.u64(ptr+scene_off);
                     let pos=if node>=0x10000{p.vec3(node+origin_off)}else{None};
                     let pos=match pos{Some(v)=>v,None=>continue};
