@@ -162,11 +162,16 @@ def check_all_native_fields(page, saved):
                 expected = not control.is_checked()
                 control.set_checked(expected)
             else:
-                value = '#a1b2c3' if kind == 'color' else control.get_attribute('min')
-                if value == original and kind == 'range':
-                    value = control.get_attribute('max')
+                if kind == 'color':
+                    value = '#a1b2c3'
+                elif kind == 'text':
+                    value = 'Ctrl+Shift+F6'
+                else:
+                    value = control.get_attribute('min')
+                    if value == original:
+                        value = control.get_attribute('max')
                 control.evaluate("(e,v)=>{e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));}", value)
-                expected = value if kind == 'color' else float(value)
+                expected = value if kind in ('color', 'text') else float(value)
                 if control.get_attribute('data-invert') == 'true':
                     expected = 100 - expected
             page.evaluate('nativePending')
