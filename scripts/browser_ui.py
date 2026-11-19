@@ -124,7 +124,7 @@ def check_preferences(page):
     page.keyboard.press('ArrowRight')
     assert page.locator('#settingsTabMini').get_attribute('aria-selected') == 'true'
     page.keyboard.press('End')
-    assert page.locator('#settingsTabSound').get_attribute('aria-selected') == 'true'
+    assert page.locator('#settingsTabSystem').get_attribute('aria-selected') == 'true'
     page.keyboard.press('Home')
     assert page.locator('#settingsTabMap').get_attribute('aria-selected') == 'true'
     page.keyboard.press('Escape')
