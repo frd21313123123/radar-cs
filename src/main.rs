@@ -168,6 +168,7 @@ fn start()->Result<(),String>{
     let schema=if args.demo {None}else {match assets::load_schema(&cache,args.offline){
         Ok(schema)=>Some(schema),Err(error)=>{eprintln!("[schema] {error}");None}
     }};
+    let schema_status=schema.as_ref().map(|s|s.info.clone()).unwrap_or_else(||json!({}));
     let secret_path=cache.join("gsi_token.txt");
     let gsi_token=fs::read_to_string(&secret_path).ok().map(|s|s.trim().to_string()).filter(|s|s.len()>25)
         .unwrap_or_else(||{let n=random_token(32);let _=fs::write(&secret_path,&n);n});
@@ -183,7 +184,8 @@ fn start()->Result<(),String>{
     let overlay=OverlayController::spawn(state.clone(),cache.clone(),args.offline);
     let server=HttpServer {bind:bind.into(),port:args.port,
         token:token.clone(),gsi_token,cache:root.join("cache"),offline:args.offline,
-        html:root.join("web/index.html"),state,overlay,killsound:cas_external_radar::killsound::KillSound::new(cache)};
+        html:root.join("web/index.html"),state,overlay,killsound:cas_external_radar::killsound::KillSound::new(cache),
+        schema_status:Mutex::new(schema_status)};
     let url=format!("http://127.0.0.1:{}/?token={}",args.port,token);
     println!("\nCAS EXTERNAL RADAR — RUST / read-only / no injection\n  PC: {url}\n");
     if args.lan {println!("  LAN: replace 127.0.0.1 with your PC's LAN IPv4, keep entire token.\n  Do not forward this port to the Internet.");}

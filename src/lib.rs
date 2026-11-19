@@ -1,5 +1,9 @@
 pub mod assets;
 pub mod avatars;
+pub mod localmaps;
+pub mod updates;
+pub mod vpk;
+pub mod vtex;
 pub mod game;
 pub mod grenade;
 pub mod gsi;

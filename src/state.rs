@@ -1,18 +1,37 @@
-use crate::model::{Snapshot,normalize_map_name};
+use crate::model::{Snapshot,MatchInfo,normalize_map_name};
 use std::time::{Duration,Instant};
 use serde_json::{json,Value};
 
 pub struct SharedState {
     pub snap:Snapshot,pub maps:Value,
     map:String,map_source:String,map_at:Instant,manual_map:Option<String>,
+    match_info:Option<MatchInfo>,match_at:Instant,
 }
 impl SharedState {
-    pub fn new(maps:Value)->Self{Self{snap:Snapshot::status("starting",""),maps,map:String::new(),map_source:String::new(),map_at:Instant::now()-Duration::from_secs(100),manual_map:None}}
+    pub fn new(maps:Value)->Self{Self{snap:Snapshot::status("starting",""),maps,map:String::new(),map_source:String::new(),map_at:Instant::now()-Duration::from_secs(100),manual_map:None,match_info:None,match_at:Instant::now()-Duration::from_secs(100)}}
     pub fn set_map(&mut self,value:&str,source:&str)->bool{
         let new=match normalize_map_name(value){Some(n)=>n,None=>return false};
         if !["memory","gsi","demo"].contains(&source){return false;}
         if source=="memory"&&self.map_source=="gsi"&&self.map_at.elapsed()<Duration::from_secs(8){return false;}
+        if self.map!=new {self.match_info=None;}
         self.map=new;self.map_source=source.into();self.map_at=Instant::now();true
+    }
+    /// Merge a GSI heartbeat. Missing fields do not erase score or phase data
+    /// from the previous heartbeat; a confirmed map change does.
+    pub fn set_match_info(&mut self,value:&Value){
+        let next=crate::gsi::match_info(value);
+        if next.is_empty(){return;}
+        if let Some(current)=self.match_info.as_mut(){
+            if next.score_ct.is_some(){current.score_ct=next.score_ct;}
+            if next.score_t.is_some(){current.score_t=next.score_t;}
+            if next.round.is_some(){current.round=next.round;}
+            if next.phase.is_some(){current.phase=next.phase;}
+            if next.phase_ends_in.is_some(){current.phase_ends_in=next.phase_ends_in;}
+            if next.bomb.is_some(){current.bomb=next.bomb;}
+            if next.win_team.is_some(){current.win_team=next.win_team;}
+            if next.mode.is_some(){current.mode=next.mode;}
+        }else{self.match_info=Some(next);}
+        self.match_at=Instant::now();
     }
     pub fn set_manual_map(&mut self,value:Option<&str>)->Result<(),String>{
         let map=match value{
@@ -26,7 +45,14 @@ impl SharedState {
     }
     /// Missing heartbeats don't change the current level. A confirmed new
     /// level or an actual process disconnect clears/replaces automatic state.
-    pub fn clear_automatic_map(&mut self){self.map.clear();self.map_source.clear();}
+    pub fn clear_automatic_map(&mut self){self.map.clear();self.map_source.clear();self.match_info=None;}
+    /// Replace the map catalogue after a local calibration or a manual refresh.
+    pub fn set_maps(&mut self,maps:Value){
+        self.maps=maps;
+        if let Some(selected)=self.manual_map.clone(){
+            if self.maps["maps"].get(&selected).is_none(){self.manual_map=None;}
+        }
+    }
     pub fn current_map(&self)->&str{self.manual_map.as_deref().unwrap_or(&self.map)}
     pub fn snapshot(&self)->Snapshot{
         let mut s=self.snap.clone();
@@ -34,6 +60,7 @@ impl SharedState {
         s.age_secs=if now.is_finite()&&s.time.is_finite(){(now-s.time).max(0.)}else{0.};
         s.game_map=self.current_map().into();
         s.game_map_source=if self.manual_map.is_some(){"manual".into()}else{self.map_source.clone()};
+        s.match_info=self.match_info.clone().filter(|_|self.match_at.elapsed()<Duration::from_secs(10));
         if let Some(d)=s.diagnostics.as_object_mut(){
             d.insert("map_known".into(),json!(!s.game_map.is_empty()));
             d.insert("map_source".into(),json!(s.game_map_source));

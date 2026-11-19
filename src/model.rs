@@ -28,6 +28,10 @@ pub struct Player {
     #[serde(default)] pub is_flashed: Option<bool>,
     #[serde(default)] pub flash_remaining_secs: Option<f32>,
     #[serde(default)] pub agent_model: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub round_kills: Option<u32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub round_damage: Option<u32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub score: Option<i32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub mvps: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -91,19 +95,56 @@ pub struct BombTimer {
     pub remaining_secs: f32,
     pub total_secs: f32,
     pub being_defused: bool,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub defuse_remaining_secs: Option<f32>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub defuse_progress: Option<f32>,
 }
 impl BombTimer {
-    pub fn from_game_time(site:i32, blow:f32, current:f32, total:f32, being_defused:bool)->Option<Self>{
+    pub fn from_game_time(site:i32, blow:f32, current:f32, total:f32, being_defused:bool,
+        defuse_blow:Option<f32>, defuse_length:Option<f32>)->Option<Self>{
         if !blow.is_finite() || !current.is_finite() || !total.is_finite()
             || !(10.0..=180.0).contains(&total) || current<0.0
             || current<blow-total-2.0 || current>=blow
             || blow-current>total+2.0 {return None;}
+        let mut defuse_remaining_secs=None;
+        let mut defuse_progress=None;
+        if being_defused {
+            if let (Some(defuse_blow),Some(defuse_length))=(defuse_blow,defuse_length){
+                if defuse_blow.is_finite()&&defuse_length.is_finite()
+                    &&(0.1..=20.0).contains(&defuse_length){
+                    let remaining=(defuse_blow-current).clamp(0.0,defuse_length);
+                    defuse_remaining_secs=Some(remaining);
+                    defuse_progress=Some((1.0-remaining/defuse_length).clamp(0.0,1.0));
+                }
+            }
+        }
         Some(Self{
             site:match site{0=>Some("A".into()),1=>Some("B".into()),_=>None},
             remaining_secs:(blow-current).clamp(0.0,total),
             total_secs:total,
             being_defused,
+            defuse_remaining_secs,
+            defuse_progress,
         })
+    }
+}
+#[derive(Clone,Debug,Default,Serialize,Deserialize)]
+pub struct MatchInfo {
+    #[serde(default,skip_serializing_if="Option::is_none")] pub score_ct:Option<u32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub score_t:Option<u32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub round:Option<u32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub phase:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub phase_ends_in:Option<f32>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub bomb:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub win_team:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub mode:Option<String>,
+}
+impl MatchInfo {
+    pub fn is_empty(&self)->bool{
+        self.score_ct.is_none()&&self.score_t.is_none()&&self.round.is_none()
+            &&self.phase.is_none()&&self.phase_ends_in.is_none()&&self.bomb.is_none()
+            &&self.win_team.is_none()&&self.mode.is_none()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,6 +178,7 @@ pub struct Snapshot {
     #[serde(default,skip_serializing_if="Option::is_none")] pub local_motion:Option<LocalMotion>,
     #[serde(default,skip_serializing_if="Option::is_none")] pub noise:Option<NoiseState>,
     #[serde(default,skip_serializing_if="Vec::is_empty")] pub noise_events:Vec<NoiseState>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub match_info:Option<MatchInfo>,
 }
 
 /// A one-step height change is not a separate floor. Never infer a level
@@ -212,7 +254,7 @@ impl Snapshot {
             c4_global_owner_id: None, details_read: false, diagnostics: json!({}),
             time: now_secs(), age_secs:0., source_hz: 0., target_hz: 60,
             message: if message.is_empty() { None } else { Some(message.to_owned()) },
-            game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,noise_events:vec![],
+            game_map: String::new(), game_map_source: String::new(),local_motion:None,noise:None,noise_events:vec![],match_info:None,
         }
     }
 }
@@ -271,7 +313,9 @@ pub fn demo_snapshot(t: f64) -> Snapshot {
             yaw:if dead {None} else {Some(((a+0.4).to_degrees()%360.-180.) as f32)},
             weapon:weapon.into(), inventory, has_c4:Some(i==1),c4_source:None,
             is_flashed:Some(i==0 && t.rem_euclid(8.)<3.),flash_remaining_secs:None,
-            agent_model:Some(if team==2 {"characters/models/tm_phoenix/tm_phoenix.vmdl"}else{"characters/models/ctm_sas/ctm_sas.vmdl"}.into())});
+            agent_model:Some(if team==2 {"characters/models/tm_phoenix/tm_phoenix.vmdl"}else{"characters/models/ctm_sas/ctm_sas.vmdl"}.into()),
+            round_kills:Some((i%4) as u32),round_damage:Some(80+i as u32*35),
+            score:Some(i as i32*3),mvps:Some((i%3) as u32)});
     }
     Snapshot { status:"demo".into(),local_team:3,players,
         grenades_read:true,
@@ -361,17 +405,17 @@ mod tests {
         assert!(!f.spectating);assert_eq!(f.name,"demo-user");
     }
     #[test] fn bomb_timer_game_time_and_sites(){
-        let a=BombTimer::from_game_time(0,120.0,95.6,40.0,false).unwrap();
+        let a=BombTimer::from_game_time(0,120.0,95.6,40.0,false,None,None).unwrap();
         assert_eq!(a.site.as_deref(),Some("A"));
         assert!((a.remaining_secs-24.4).abs()<0.001);
-        let b=BombTimer::from_game_time(1,50.0,15.0,40.0,true).unwrap();
+        let b=BombTimer::from_game_time(1,50.0,15.0,40.0,true,Some(20.0),Some(10.0)).unwrap();
         assert_eq!(b.site.as_deref(),Some("B"));assert!(b.being_defused);
-        assert!(BombTimer::from_game_time(99,50.0,12.0,40.0,false).unwrap().site.is_none());
+        assert!(BombTimer::from_game_time(99,50.0,12.0,40.0,false,None,None).unwrap().site.is_none());
     }
     #[test] fn bomb_timer_rejects_expired_or_invalid_values(){
-        assert!(BombTimer::from_game_time(0,100.0,100.0,40.0,false).is_none());
-        assert!(BombTimer::from_game_time(0,100.0,30.0,40.0,false).is_none());
-        assert!(BombTimer::from_game_time(0,100.0,f32::NAN,40.0,false).is_none());
+        assert!(BombTimer::from_game_time(0,100.0,100.0,40.0,false,None,None).is_none());
+        assert!(BombTimer::from_game_time(0,100.0,30.0,40.0,false,None,None).is_none());
+        assert!(BombTimer::from_game_time(0,100.0,f32::NAN,40.0,false,None,None).is_none());
     }
     #[test] fn json_browser_contract(){
         let v=serde_json::to_value(demo_snapshot(1.)).unwrap();

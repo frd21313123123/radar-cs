@@ -156,6 +156,18 @@ pub struct OverlaySettings {
     pub friend_color: String,
     pub enemy_color: String,
     pub self_color: String,
+    pub click_through: bool,
+    pub tray_icon: bool,
+    pub hotkey_toggle: String,
+    pub hotkey_click_through: String,
+    pub hotkey_zoom_in: String,
+    pub hotkey_zoom_out: String,
+    pub hotkey_opacity_up: String,
+    pub hotkey_opacity_down: String,
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    pub window_w: Option<i32>,
+    pub window_h: Option<i32>,
 }
 impl Default for OverlaySettings {
     fn default()->Self {Self { visible:false,topmost:true,center_local:true,follow_spectator:true,rotate_with_view:true,show_noise:true,show_sites:true,show_smokes:true,show_fire:true,show_paths:true,show_bomb_timer:true,
@@ -164,7 +176,12 @@ impl Default for OverlaySettings {
         show_self:true,show_offscreen:true,show_utility_timers:true,noise_animation:true,noise_show_range:true,
         noise_opacity:75,noise_color:"#ffc04d".into(),marker_scale:1.,text_size:13,
         zoom:1.0,max_fps:30,opacity:100,friend_color:"#54b8ff".into(),
-        enemy_color:"#ffc04d".into(),self_color:"#d2f24a".into()}}
+        enemy_color:"#ffc04d".into(),self_color:"#d2f24a".into(),
+        click_through:false,tray_icon:true,hotkey_toggle:"Ctrl+Shift+R".into(),
+        hotkey_click_through:"Ctrl+Shift+X".into(),hotkey_zoom_in:"Ctrl+Shift+Plus".into(),
+        hotkey_zoom_out:"Ctrl+Shift+Minus".into(),hotkey_opacity_up:"Ctrl+Shift+PageUp".into(),
+        hotkey_opacity_down:"Ctrl+Shift+PageDown".into(),
+        window_x:None,window_y:None,window_w:None,window_h:None}}
 }
 impl OverlaySettings {
     fn update(&mut self, v:&Value)->Result<(),String> {
@@ -172,12 +189,24 @@ impl OverlaySettings {
         let mut merged=serde_json::to_value(&*self).map_err(|e|e.to_string())?;
         for (key,value) in patch {
             let current=merged.get(key).ok_or_else(||format!("Unknown setting: {key}"))?;
+            if key.starts_with("window_"){
+                if value.is_null(){continue;}
+                if value.as_i64().is_some_and(|n|(-100_000..=100_000).contains(&n)){
+                    merged[key]=value.clone();continue;
+                }
+                return Err(format!("Invalid {key}"));
+            }
+            if current.is_null()&&value.is_null(){continue;}
             if current.is_boolean(){
                 if !value.is_boolean(){return Err(format!("{key} must be boolean"));}
             }else if current.is_string(){
-                let color=value.as_str().ok_or("color must be string")?;
-                if color.len()!=7||!color.starts_with('#')||!color[1..].bytes().all(|b|b.is_ascii_hexdigit()){
-                    return Err(format!("Invalid {key}"));
+                let text=value.as_str().ok_or("string value expected")?;
+                if key.starts_with("hotkey_") {
+                    if text.len()>40 {return Err(format!("Invalid {key}"));}
+                }else{
+                    if text.len()!=7||!text.starts_with('#')||!text[1..].bytes().all(|b|b.is_ascii_hexdigit()){
+                        return Err(format!("Invalid {key}"));
+                    }
                 }
             }else{
                 let valid=match key.as_str(){
@@ -212,6 +241,39 @@ impl OverlaySettings {
         (34.+10.*self.marker_scale+line+6.,bottom)
     }
 
+}
+/// Parse a user-facing hotkey such as `Ctrl+Shift+R`. At least one modifier is
+/// required so the radar never steals a bare gameplay key while unfocused.
+fn parse_hotkey(text:&str)->Option<(u32,u32)>{
+    let mut modifiers=0u32;
+    let mut key=None;
+    for raw in text.split('+'){
+        let part=raw.trim().to_ascii_lowercase();
+        match part.as_str(){
+            "ctrl"|"control"=>modifiers|=0x0002,
+            "shift"=>modifiers|=0x0004,
+            "alt"=>modifiers|=0x0001,
+            "win"|"super"=>modifiers|=0x0008,
+            "plus"|"+"=>key=Some(0xBBu32),
+            "minus"|"-"=>key=Some(0xBDu32),
+            "pageup"|"pgup"=>key=Some(0x21u32),
+            "pagedown"|"pgdn"=>key=Some(0x22u32),
+            "insert"|"ins"=>key=Some(0x2Du32),
+            "delete"|"del"=>key=Some(0x2Eu32),
+            "home"=>key=Some(0x24u32),
+            "end"=>key=Some(0x23u32),
+            "tab"=>key=Some(0x09u32),
+            "space"=>key=Some(0x20u32),
+            _ if part.len()==1 && part.as_bytes()[0].is_ascii_alphanumeric()=>
+                key=Some(part.to_ascii_uppercase().as_bytes()[0] as u32),
+            _ if part.starts_with('f') => {
+                let number=part[1..].parse::<u32>().ok()?;
+                if (1..=12).contains(&number){key=Some(0x70+number-1);}else{return None;}
+            }
+            _=>return None,
+        }
+    }
+    if modifiers==0||key.is_none(){None}else{Some((modifiers,key.unwrap()))}
 }
 #[derive(Clone)]pub struct OverlayController {settings:Arc<Mutex<OverlaySettings>>, #[cfg(windows)]inner:Arc<win::WindowBridge>, #[cfg(windows)]persist_path:std::path::PathBuf}
 impl OverlayController {
@@ -260,10 +322,18 @@ mod win {
     type HDC=*mut c_void;
     const WM_CLOSE:u32=0x10;const WM_DESTROY:u32=0x02;const WM_PAINT:u32=0x0F;const WM_ERASEBKGND:u32=0x14;const WM_GETMINMAXINFO:u32=0x24;
     const WM_TIMER:u32=0x113;const WM_MOUSEWHEEL:u32=0x20A;const WM_KEYDOWN:u32=0x100;const WM_APP_SETTINGS:u32=0x8001;
+    const WM_APP_TRAY:u32=0x8002;const WM_HOTKEY:u32=0x312;const WM_EXITSIZEMOVE:u32=0x232;const WM_COMMAND:u32=0x111;
+    const WM_LBUTTONDBLCLK:u32=0x203;const WM_RBUTTONUP:u32=0x205;
     const SW_HIDE:i32=0;const SW_SHOW:i32=5;
     const WS_POPUP:u32=0x80000000;const WS_THICKFRAME:u32=0x00040000;
     const WM_NCCALCSIZE:u32=0x83;const WM_NCHITTEST:u32=0x84;const WM_LBUTTONUP:u32=0x202;const WS_EX_TOPMOST:u32=0x00000008;
-    const WS_EX_LAYERED:u32=0x00080000;const SWP_NOMOVE:u32=0x0002;const SWP_NOSIZE:u32=0x0001;const SWP_NOACTIVATE:u32=0x0010;
+    const WS_EX_LAYERED:u32=0x00080000;const WS_EX_TRANSPARENT:u32=0x00000020;const GWL_EXSTYLE:i32=-20;
+    const SWP_NOMOVE:u32=0x0002;const SWP_NOSIZE:u32=0x0001;const SWP_NOACTIVATE:u32=0x0010;
+    const HOTKEY_TOGGLE:i32=0x4101;const HOTKEY_CLICK_THROUGH:i32=0x4102;
+    const HOTKEY_ZOOM_IN:i32=0x4103;const HOTKEY_ZOOM_OUT:i32=0x4104;
+    const HOTKEY_OPACITY_UP:i32=0x4105;const HOTKEY_OPACITY_DOWN:i32=0x4106;
+    const NIM_ADD:u32=0;const NIM_DELETE:u32=2;const NIF_MESSAGE:u32=1;const NIF_ICON:u32=2;const NIF_TIP:u32=4;
+    const TRAY_ID:u32=1;
     const LWA_ALPHA:u32=0x0002;const TRANSPARENT:i32=1;
     const SRCCOPY:u32=0x00CC0020; // CAS_ANTI_FLICKER_V11
     #[repr(C)]#[derive(Default,Clone,Copy)]struct Rect {left:i32,top:i32,right:i32,bottom:i32}
@@ -275,6 +345,14 @@ mod win {
         instance:HWND,icon:HWND,cursor:HWND,background:HWND,menu:*const u16,class:*const u16}
     #[repr(C)]struct Msg {hwnd:HWND,msg:u32,wparam:usize,lparam:isize,time:u32,pt:Point,lprivate:u32}
     impl Default for Msg {fn default()->Self{unsafe{std::mem::zeroed()}}}
+    #[repr(C)]struct NotifyIconDataW {
+        cb_size:u32,hwnd:HWND,uid:u32,flags:u32,callback:u32,icon:HWND,
+        tip:[u16;128],state:u32,state_mask:u32,info:[u16;256],version:u32,
+        info_title:[u16;64],info_flags:u32,guid:[u8;16],balloon:HWND,
+    }
+    impl Default for NotifyIconDataW {
+        fn default()->Self{unsafe{std::mem::zeroed()}}
+    }
     #[repr(C)]struct GdiStart {version:u32,callback:*mut c_void,suppress_background:i32,suppress_codecs:i32}
     #[link(name="user32")]
     extern "system" {
@@ -296,6 +374,22 @@ mod win {
         fn TranslateMessage(msg:*const Msg)->i32;fn DispatchMessageW(msg:*const Msg)->isize;
         fn PostMessageW(hwnd:HWND,msg:u32,wparam:usize,lparam:isize)->i32;
         fn PostQuitMessage(code:i32);
+        fn RegisterHotKey(hwnd:HWND,id:i32,modifiers:u32,key:u32)->i32;
+        fn UnregisterHotKey(hwnd:HWND,id:i32)->i32;
+        fn GetWindowLongPtrW(hwnd:HWND,index:i32)->isize;
+        fn SetWindowLongPtrW(hwnd:HWND,index:i32,value:isize)->isize;
+        fn GetSystemMetrics(index:i32)->i32;
+        fn SetProcessDpiAwarenessContext(context:isize)->i32;
+        fn LoadIconW(instance:HWND,name:*const u16)->HWND;
+        fn SetForegroundWindow(hwnd:HWND)->i32;
+        fn GetCursorPos(point:*mut Point)->i32;
+        fn CreatePopupMenu()->HWND;
+        fn AppendMenuW(menu:HWND,flags:u32,id:usize,text:*const u16)->i32;
+        fn TrackPopupMenu(menu:HWND,flags:u32,x:i32,y:i32,reserved:i32,owner:HWND,rect:*const Rect)->i32;
+        fn DestroyMenu(menu:HWND)->i32;
+    }
+    #[link(name="shell32")]extern "system" {
+        fn Shell_NotifyIconW(message:u32,data:*const NotifyIconDataW)->i32;
     }
     #[link(name="kernel32")]extern "system" {fn GetModuleHandleW(module:*const u16)->HWND;}
     #[link(name="gdi32")]extern "system" {
@@ -908,10 +1002,70 @@ mod win {
     }
     thread_local!{static STATUS:RefCell<String>=const{RefCell::new(String::new())};}
     thread_local!{static BOMB_PANEL:RefCell<Option<BombPanel>>=const{RefCell::new(None)};}
+    fn persist_config(cfg:&OverlaySettings){
+        if let Some(bridge)=GLOBAL.get(){
+            if let Ok(bytes)=serde_json::to_vec_pretty(cfg){
+                let _=std::fs::write(bridge.cache.join("overlay_settings.json"),bytes);
+            }
+        }
+    }
+    unsafe fn apply_click_through(hwnd:HWND,enabled:bool){
+        let style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+        let next=if enabled{style|WS_EX_TRANSPARENT as isize}else{style&!(WS_EX_TRANSPARENT as isize)};
+        if next!=style{SetWindowLongPtrW(hwnd,GWL_EXSTYLE,next);}
+    }
+    unsafe fn update_tray(hwnd:HWND,cfg:&OverlaySettings){
+        static TRAY_ADDED:AtomicBool=AtomicBool::new(false);
+        if cfg.tray_icon {
+            if !TRAY_ADDED.load(Ordering::Relaxed){
+                let mut data=NotifyIconDataW::default();
+                data.cb_size=std::mem::size_of::<NotifyIconDataW>() as u32;
+                data.hwnd=hwnd;data.uid=TRAY_ID;
+                data.flags=NIF_MESSAGE|NIF_ICON|NIF_TIP;data.callback=WM_APP_TRAY;
+                data.icon=LoadIconW(null_mut(),32512usize as *const u16);
+                let tip=wide("CAS Radar - Mini Map");let len=tip.len().min(128);
+                data.tip[..len].copy_from_slice(&tip[..len]);
+                if Shell_NotifyIconW(NIM_ADD,&data)!=0{TRAY_ADDED.store(true,Ordering::Relaxed);}
+            }
+        }else if TRAY_ADDED.swap(false,Ordering::Relaxed){
+            let mut data=NotifyIconDataW::default();
+            data.cb_size=std::mem::size_of::<NotifyIconDataW>() as u32;
+            data.hwnd=hwnd;data.uid=TRAY_ID;
+            let _=Shell_NotifyIconW(NIM_DELETE,&data);
+        }
+    }
+    unsafe fn register_hotkeys(hwnd:HWND,cfg:&OverlaySettings){
+        for id in [HOTKEY_TOGGLE,HOTKEY_CLICK_THROUGH,HOTKEY_ZOOM_IN,HOTKEY_ZOOM_OUT,HOTKEY_OPACITY_UP,HOTKEY_OPACITY_DOWN]{
+            let _=UnregisterHotKey(hwnd,id);
+        }
+        for (id,text) in [(HOTKEY_TOGGLE,&cfg.hotkey_toggle),(HOTKEY_CLICK_THROUGH,&cfg.hotkey_click_through),
+            (HOTKEY_ZOOM_IN,&cfg.hotkey_zoom_in),(HOTKEY_ZOOM_OUT,&cfg.hotkey_zoom_out),
+            (HOTKEY_OPACITY_UP,&cfg.hotkey_opacity_up),(HOTKEY_OPACITY_DOWN,&cfg.hotkey_opacity_down)]{
+            if let Some((modifiers,key))=parse_hotkey(text){let _=RegisterHotKey(hwnd,id,modifiers,key);}
+        }
+    }
+    unsafe fn save_window_rect(hwnd:HWND){
+        let Some(bridge)=GLOBAL.get()else{return};
+        let mut rect=Rect::default();
+        if GetWindowRect(hwnd,&mut rect)==0||rect.right<=rect.left+120||rect.bottom<=rect.top+90{return;}
+        if let Ok(mut cfg)=bridge.settings.lock(){
+            cfg.window_x=Some(rect.left);cfg.window_y=Some(rect.top);
+            cfg.window_w=Some(rect.right-rect.left);cfg.window_h=Some(rect.bottom-rect.top);
+            persist_config(&cfg);
+        }
+    }
+    unsafe fn toggle_visible(hwnd:HWND){
+        let Some(bridge)=GLOBAL.get()else{return};
+        let next={let Ok(mut cfg)=bridge.settings.lock()else{return};cfg.visible=!cfg.visible;cfg.clone()};
+        persist_config(&next);update_window(hwnd);
+    }
     unsafe fn update_window(hwnd:HWND){
         let bridge=match GLOBAL.get(){Some(b)=>b,None=>return};
         let cfg=bridge.settings.lock().map(|s|s.clone()).unwrap_or_default();
         SetLayeredWindowAttributes(hwnd,0,((cfg.opacity as u16*255)/100) as u8,LWA_ALPHA);
+        apply_click_through(hwnd,cfg.click_through);
+        update_tray(hwnd,&cfg);
+        register_hotkeys(hwnd,&cfg);
         SetTimer(hwnd,1,1000u32.div_ceil(u32::from(cfg.max_fps.max(1))),null());
         SetWindowPos(hwnd,if cfg.topmost{-1isize as HWND}else{-2isize as HWND},0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         if cfg.visible {ShowWindow(hwnd,SW_SHOW);}else{ShowWindow(hwnd,SW_HIDE);}
@@ -937,10 +1091,66 @@ mod win {
                 if x>=rect.right-40&&x<rect.right-6&&(4..34).contains(&y){PostMessageW(hwnd,WM_CLOSE,0,0);}
                 0
             }
-            WM_CLOSE=>{if let Some(b)=GLOBAL.get(){if let Ok(mut s)=b.settings.lock(){s.visible=false;
+            WM_EXITSIZEMOVE=>{save_window_rect(hwnd);0}
+            WM_HOTKEY=>{
+                if let Some(b)=GLOBAL.get(){
+                    let id=wparam as i32;
+                    if id==HOTKEY_TOGGLE{toggle_visible(hwnd);}
+                    else{
+                        let next={let Ok(mut cfg)=b.settings.lock()else{return 0};
+                            match id{
+                                HOTKEY_CLICK_THROUGH=>cfg.click_through=!cfg.click_through,
+                                HOTKEY_ZOOM_IN=>cfg.zoom=(cfg.zoom*1.1).min(4.),
+                                HOTKEY_ZOOM_OUT=>cfg.zoom=(cfg.zoom*0.9).max(0.35),
+                                HOTKEY_OPACITY_UP=>cfg.opacity=cfg.opacity.saturating_add(5).min(100),
+                                HOTKEY_OPACITY_DOWN=>cfg.opacity=cfg.opacity.saturating_sub(5).max(10),
+                                _=>return 0,
+                            }
+                            cfg.clone()
+                        };
+                        persist_config(&next);update_window(hwnd);
+                    }
+                }
+                0
+            }
+            WM_APP_TRAY=>{
+                let event=(lparam as u32)&0xffff;
+                if event==WM_LBUTTONDBLCLK{toggle_visible(hwnd);}
+                else if event==WM_RBUTTONUP{
+                    let menu=CreatePopupMenu();
+                    if !menu.is_null(){
+                        let _=AppendMenuW(menu,0,1,wide("Показать / скрыть").as_ptr());
+                        let _=AppendMenuW(menu,0,2,wide("Выход").as_ptr());
+                        let mut point=Point::default();let _=GetCursorPos(&mut point);
+                        let _=SetForegroundWindow(hwnd);
+                        let _=TrackPopupMenu(menu,0x0002|0x0020,point.x,point.y,0,hwnd,null());
+                        let _=DestroyMenu(menu);
+                    }
+                }
+                0
+            }
+            WM_COMMAND=>{
+                match (wparam&0xffff) as usize{
+                    1=>toggle_visible(hwnd),
+                    2=>PostQuitMessage(0),
+                    _=>{}
+                }
+                0
+            }
+            WM_CLOSE=>{save_window_rect(hwnd);if let Some(b)=GLOBAL.get(){if let Ok(mut s)=b.settings.lock(){s.visible=false;
                 let _=std::fs::write(b.cache.join("overlay_settings.json"),serde_json::to_vec_pretty(&*s).unwrap_or_default());
             }}ShowWindow(hwnd,SW_HIDE);0}
-            WM_DESTROY=>{KillTimer(hwnd,1);PostQuitMessage(0);0}
+            WM_DESTROY=>{
+                KillTimer(hwnd,1);
+                for id in [HOTKEY_TOGGLE,HOTKEY_CLICK_THROUGH,HOTKEY_ZOOM_IN,HOTKEY_ZOOM_OUT,HOTKEY_OPACITY_UP,HOTKEY_OPACITY_DOWN]{
+                    let _=UnregisterHotKey(hwnd,id);
+                }
+                let mut data=NotifyIconDataW::default();
+                data.cb_size=std::mem::size_of::<NotifyIconDataW>() as u32;
+                data.hwnd=hwnd;data.uid=TRAY_ID;
+                let _=Shell_NotifyIconW(NIM_DELETE,&data);
+                PostQuitMessage(0);0
+            }
             WM_ERASEBKGND=>1,
             WM_APP_SETTINGS=>{update_window(hwnd);0}
             WM_TIMER=>{
@@ -1050,6 +1260,8 @@ mod win {
         }
     }
     unsafe fn run(){
+        // Per-monitor V2 keeps the GDI+ layout crisp on mixed-DPI desktops.
+        let _=SetProcessDpiAwarenessContext(-4);
         let mut gdip=0usize;
         if GdiplusStartup(&mut gdip,&GdiStart{version:1,callback:null_mut(),suppress_background:0,suppress_codecs:0},null_mut())!=0 {
             eprintln!("[overlay] GDI+ initialization failed");return;
@@ -1058,7 +1270,17 @@ mod win {
         let wc=WindowClass{style:0,proc:Some(wnd_proc),cls_extra:0,wnd_extra:0,instance,icon:null_mut(),cursor:LoadCursorW(null_mut(),32512usize as *const u16),background:null_mut(),menu:null(),class:class.as_ptr()};
         if RegisterClassW(&wc)==0 {eprintln!("[overlay] RegisterClassW failed");GdiplusShutdown(gdip);return;}
         let title=wide("CAS Radar - Mini Map");
-        let hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,class.as_ptr(),title.as_ptr(),WS_POPUP|WS_THICKFRAME,100,100,370,370,null_mut(),null_mut(),instance,null());
+        let (mut x,mut y,mut width,mut height)=(100,100,370,370);
+        if let Some(bridge)=GLOBAL.get(){
+            if let Ok(cfg)=bridge.settings.lock(){
+                if let (Some(sx),Some(sy),Some(sw),Some(sh))=(cfg.window_x,cfg.window_y,cfg.window_w,cfg.window_h){
+                    if sw>=295&&sh>=205&&sw<=4096&&sh<=4096{x=sx;y=sy;width=sw;height=sh;}
+                }
+            }
+        }
+        let (vx,vy,vw,vh)=(GetSystemMetrics(76),GetSystemMetrics(77),GetSystemMetrics(78),GetSystemMetrics(79));
+        if x+60<vx||x>vx+vw-60||y+40<vy||y>vy+vh-40{x=100;y=100;}
+        let hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,class.as_ptr(),title.as_ptr(),WS_POPUP|WS_THICKFRAME,x,y,width,height,null_mut(),null_mut(),instance,null());
         if hwnd.is_null(){eprintln!("[overlay] CreateWindowExW failed");GdiplusShutdown(gdip);return;}
         if let Some(b)=GLOBAL.get(){b.hwnd.store(hwnd as isize,Ordering::Release);}
         // Initially hidden; browser exposes Open Mini Radar settings to show it.
@@ -1074,6 +1296,31 @@ mod win {
 
 #[cfg(test)]mod tests {
     use super::*;
+    #[test]fn hotkeys_require_a_modifier_and_map_keys(){
+        assert_eq!(parse_hotkey("Ctrl+Shift+R"),Some((0x0002|0x0004,0x52)));
+        assert_eq!(parse_hotkey("Alt+F5"),Some((0x0001,0x74)));
+        assert_eq!(parse_hotkey("Ctrl+Plus"),Some((0x0002,0xBB)));
+        assert_eq!(parse_hotkey("R"),None);
+        assert_eq!(parse_hotkey("Ctrl+Unknown"),None);
+    }
+    #[test]fn window_state_and_accessibility_settings_roundtrip(){
+        let mut settings=OverlaySettings::default();
+        settings.update(&json!({"click_through":true,"tray_icon":false,
+            "hotkey_toggle":"Alt+R","hotkey_click_through":"Ctrl+PageUp",
+            "hotkey_zoom_in":"Alt+Plus","hotkey_zoom_out":"Alt+Minus",
+            "hotkey_opacity_up":"Alt+PageUp","hotkey_opacity_down":"Alt+PageDown"})).unwrap();
+        settings.window_x=Some(120);settings.window_y=Some(80);
+        settings.window_w=Some(420);settings.window_h=Some(360);
+        let saved=serde_json::to_value(&settings).unwrap();
+        let mut restored=OverlaySettings::default();restored.update(&saved).unwrap();
+        assert!(restored.click_through);assert!(!restored.tray_icon);
+        assert_eq!(restored.hotkey_toggle,"Alt+R");
+        assert_eq!(restored.hotkey_click_through,"Ctrl+PageUp");
+        assert_eq!(restored.hotkey_zoom_in,"Alt+Plus");
+        assert_eq!(restored.hotkey_opacity_down,"Alt+PageDown");
+        assert_eq!((restored.window_x,restored.window_y,restored.window_w,restored.window_h),
+            (Some(120),Some(80),Some(420),Some(360)));
+    }
     #[test]fn dense_labels_fit_even_at_the_minimum_window_size(){
         let mut settings=OverlaySettings::default();assert_eq!(settings.marker_padding(),(65.,72.));
         settings.show_armor=true;settings.marker_scale=1.75;settings.text_size=18;

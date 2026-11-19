@@ -7,6 +7,7 @@ pub struct HttpServer {
     pub bind:String,pub port:u16,pub token:String,pub gsi_token:String,
     pub cache:PathBuf,pub offline:bool,pub html:PathBuf,pub state:Arc<Mutex<SharedState>>,pub overlay:OverlayController,
     pub killsound:crate::killsound::KillSound,
+    pub schema_status:Mutex<Value>,
 }
 impl HttpServer {
     pub fn serve(self)->Result<(),String>{
@@ -82,6 +83,7 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             // retain the last map, and manual selection remains independent.
             if value.get("map")==Some(&Value::Null){state.clear_automatic_map();}
             else if let Some(name)=gsi::gsi_map(&value){state.set_map(&name,"gsi");}
+            state.set_match_info(&value);
         }
         server.killsound.observe(&value);
         return reply_json(&mut stream,200,json!({"ok":true}));
@@ -170,6 +172,99 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
             Err(e)=>reply_json(&mut stream,400,json!({"error":e})),
         };
     }
+    // Force a fresh map catalogue and schema. The running reader keeps its
+    // already-validated schema; `restart_required` tells the UI when the new
+    // build must be applied by restarting rather than swapped mid-match.
+    if method=="POST" && path=="/api/update" {
+        if query_arg(query,"token")!=Some(server.token.as_str()){
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        if server.offline {return reply_json(&mut stream,400,json!({"error":"Offline mode: connect to the Internet first"}));}
+        let previous_build=server.schema_status.lock().ok()
+            .and_then(|v|v.get("build_number").and_then(Value::as_u64));
+        let maps=assets::load_maps(&server.cache,false,true);
+        let map_count=maps["maps"].as_object().map(|m|m.len()).unwrap_or(0);
+        if let Ok(mut state)=server.state.lock(){state.set_maps(maps);}
+        let schema_info=match assets::load_schema(&server.cache,false){
+            Ok(schema)=>schema.info,
+            Err(error)=>json!({"error":error}),
+        };
+        let new_build=schema_info.get("build_number").and_then(Value::as_u64);
+        let restart_required=schema_info.get("error").is_none()&&new_build.is_some()&&new_build!=previous_build;
+        if let Ok(mut status)=server.schema_status.lock(){*status=schema_info.clone();}
+        return reply_json(&mut stream,200,json!({
+            "ok":schema_info.get("error").is_none(),
+            "maps":map_count,
+            "schema":schema_info,
+            "restart_required":restart_required,
+        }));
+    }
+    if method=="POST" && path=="/api/app-update/install" {
+        if query_arg(query,"token")!=Some(server.token.as_str()){
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        return match crate::updates::install(&server.cache) {
+            Ok(value)=>{
+                if value["installed"].as_bool()==Some(true){
+                    // Give the HTTP response time to reach the browser, then
+                    // let the helper replace this EXE and start the new build.
+                    let _=std::thread::spawn(||{std::thread::sleep(Duration::from_millis(1200));std::process::exit(0);});
+                }
+                reply_json(&mut stream,200,value)
+            }
+            Err(error)=>reply_json(&mut stream,502,json!({"error":error})),
+        };
+    }
+    if method=="POST" && path=="/api/maps/local-image" {
+        if query_arg(query,"token")!=Some(server.token.as_str()){
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        let headers:Vec<(&str,&str)>=lines.filter_map(|l|l.split_once(':')).collect();
+        let ctype=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Type")).map(|(_,v)|v.trim()).unwrap_or("");
+        if ctype!="image/png" {return reply_json(&mut stream,400,json!({"error":"expected image/png"}));}
+        let len=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Length"))
+            .and_then(|(_,v)|v.trim().parse::<usize>().ok());
+        let len=match len{Some(n) if n>8&&n<=8*1024*1024=>n,_=>return reply_json(&mut stream,413,json!({"error":"invalid PNG size"}))};
+        let mut body=header[boundary..].to_vec();
+        while body.len()<len{
+            let count=stream.read(&mut buf[..(len-body.len()).min(4096)])?;if count==0{break;}
+            body.extend_from_slice(&buf[..count]);
+        }
+        if body.len()<len{return reply_json(&mut stream,400,json!({"error":"incomplete PNG"}));}
+        let name=query_value(query,"name").unwrap_or_default();
+        return match crate::localmaps::save_calibration_image(&server.cache,&name,&body[..len]){
+            Ok(file)=>reply_json(&mut stream,200,json!({"ok":true,"file":file})),
+            Err(error)=>reply_json(&mut stream,400,json!({"error":error})),
+        };
+    }
+    if method=="POST" && path=="/api/maps/local" {
+        if query_arg(query,"token")!=Some(server.token.as_str()){
+            return reply_json(&mut stream,403,json!({"error":"invalid access token"}));
+        }
+        let headers:Vec<(&str,&str)>=lines.filter_map(|l|l.split_once(':')).collect();
+        let ctype=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Type")).map(|(_,v)|v.trim()).unwrap_or("");
+        if !ctype.starts_with("application/json") {return reply_json(&mut stream,400,json!({"error":"expected application/json"}));}
+        let len=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("Content-Length"))
+            .and_then(|(_,v)|v.trim().parse::<usize>().ok());
+        let len=match len{Some(n) if n>0&&n<=8192=>n,_=>return reply_json(&mut stream,413,json!({"error":"invalid calibration size"}))};
+        let mut body=header[boundary..].to_vec();
+        while body.len()<len{
+            let count=stream.read(&mut buf[..(len-body.len()).min(4096)])?;if count==0{break;}
+            body.extend_from_slice(&buf[..count]);
+        }
+        if body.len()<len{return reply_json(&mut stream,400,json!({"error":"incomplete calibration"}));}
+        let value:Value=match serde_json::from_slice(&body[..len]){Ok(v)=>v,Err(_)=>return reply_json(&mut stream,400,json!({"error":"invalid JSON"}))};
+        let name=value.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
+        let image_file=value.get("image_file").and_then(Value::as_str)
+            .map(str::to_owned).unwrap_or_else(||format!("{name}_radar_psd.png"));
+        let entry=match crate::localmaps::save_calibration(&server.cache,&value,&image_file){
+            Ok(entry)=>entry,
+            Err(error)=>return reply_json(&mut stream,400,json!({"error":error})),
+        };
+        let maps=assets::load_maps(&server.cache,server.offline,false);
+        if let Ok(mut state)=server.state.lock(){state.set_maps(maps);}
+        return reply_json(&mut stream,200,json!({"ok":true,"map":entry}));
+    }
     if method!="GET" {return reply_json(&mut stream,404,json!({"error":"not found"}));}
     if query_arg(query,"token")!=Some(server.token.as_str()){
         if path=="/"{
@@ -214,6 +309,29 @@ fn handle(mut stream:TcpStream,server:&HttpServer)->std::io::Result<()> {
         }
         "/api/overlay"=>reply_json(&mut stream,200,server.overlay.status()),
         "/api/killsound"=>reply_json(&mut stream,200,server.killsound.status()),
+        "/api/schema"=>{
+            let schema=server.schema_status.lock().map(|v|v.clone()).unwrap_or_else(|_|json!({}));
+            let game=server.state.lock().map(|s|s.snapshot().diagnostics).unwrap_or_else(|_|json!({}));
+            reply_json(&mut stream,200,json!({"schema":schema,"game":game,"version":env!("CARGO_PKG_VERSION")}))
+        }
+        "/api/app-update"=>{
+            match crate::updates::check(){
+                Ok(value)=>reply_json(&mut stream,200,value),
+                Err(error)=>reply_json(&mut stream,502,json!({"error":error})),
+            }
+        }
+        "/api/maps/local"=>{
+            let local=server.state.lock().map(|s|{
+                let mut result=json!({"maps":{}});
+                for (name,entry) in s.maps["maps"].as_object().into_iter().flatten(){
+                    if entry["source"].as_str()==Some("calibration"){
+                        result["maps"][name]=entry.clone();
+                    }
+                }
+                result
+            }).unwrap_or_else(|_|json!({"maps":{}}));
+            reply_json(&mut stream,200,local)
+        }
         "/api/bomb-icon"=>respond_cached(&mut stream,200,include_bytes!("../assets/bomb_ground.png"),"image/png","private, max-age=86400"),
         "/api/maps"=>{
             let maps=server.state.lock().map(|s|s.maps.clone()).map_err(|_|std::io::Error::other("poisoned state"))?;

@@ -257,14 +257,16 @@ impl CS2Reader {
         let total=try_f32(p,ptr+field("m_flTimerLength")?)?;
         let site=field("m_nBombSite").and_then(|o|try_i32(p,ptr+o)).unwrap_or(-1);
         let defusing=field("m_bBeingDefused").and_then(|o|try_u8(p,ptr+o))==Some(1);
+        let defuse_blow=field("m_flDefuseCountDown").and_then(|o|try_f32(p,ptr+o));
+        let defuse_length=field("m_flDefuseLength").and_then(|o|try_f32(p,ptr+o));
         if let Some(current)=self.global_time(p,base){
             // A dead/observing player's tick base can stop advancing. Once the
             // global clock reaches detonation, that old clock must not revive C4.
             if current>=blow{return None;}
-            if let Some(timer)=BombTimer::from_game_time(site,blow,current,total,defusing){return Some(timer);}
+            if let Some(timer)=BombTimer::from_game_time(site,blow,current,total,defusing,defuse_blow,defuse_length){return Some(timer);}
         }
         self.controller_time(p,base).and_then(|current|
-            BombTimer::from_game_time(site,blow,current,total,defusing))
+            BombTimer::from_game_time(site,blow,current,total,defusing,defuse_blow,defuse_length))
     }
     fn planted_c4_timer<M:Memory>(&self,p:&mut M,base:u64)->Option<BombTimer>{
         let ptr=self.planted_pointer(p,base)?;
@@ -590,8 +592,11 @@ impl CS2Reader {
         diag.set("offsets_build",self.schema.info["build_number"].clone());
         diag.set("offsets_timestamp",self.schema.info["timestamp"].clone());
         diag.set("offsets_revision",self.schema.info["revision"].clone());
+        // After a game patch the build-number slot can briefly contain a large
+        // unrelated value. Treat implausible numbers as unknown instead of
+        // starting a signal scan on every snapshot.
         let build=if engine!=0{self.schema.engine_offset("dwBuildNumber")
-            .and_then(|off|try_i32(p,engine+off)).filter(|b|*b>0)}else{None};
+            .and_then(|off|try_i32(p,engine+off)).filter(|b|*b>0&&*b<=1_000_000)}else{None};
         diag.set("game_build",json!(build));
         let same=build.and_then(|b|self.schema.info["build_number"].as_u64().map(|n|n==b as u64));
         diag.set("offsets_match_game",json!(same));
@@ -789,12 +794,25 @@ impl CS2Reader {
             let name=name_off.map(|o|p.cstr(ctl+o,128)).unwrap_or_default();
             let (mut weapon,mut inventory,mut has_c4)=("—".to_owned(),vec![],None);
             let (mut money,mut armor,mut helmet,mut defuser)=(None,0,false,false);
+            let (mut round_kills,mut round_damage,mut score,mut mvps)=(None,None,None,None);
             if details {
                 (weapon,inventory,has_c4)=self.player_items(p,list,pawn);
                 let money_ptr=opt_u64(p,ctl,money_off);money=opt_i32(p,money_ptr,account_off).filter(|n|(0..=100000).contains(n));
                 armor=opt_i32(p,pawn,armor_off).unwrap_or(0).clamp(0,200);
                 helmet=helmet_off.is_some_and(|o|p.u8(ctl+o)!=0);
                 defuser=defuser_off.is_some_and(|o|p.u8(ctl+o)!=0);
+                score=self.schema.field("CCSPlayerController","m_iScore")
+                    .and_then(|o|try_i32(p,ctl+o)).filter(|v|(0..=1_000_000).contains(v));
+                mvps=self.schema.field("CCSPlayerController","m_iMVPs")
+                    .and_then(|o|try_i32(p,ctl+o)).filter(|v|(0..=10_000).contains(v)).map(|v|v as u32);
+                let tracking=opt_u64(p,ctl,self.schema.field("CCSPlayerController","m_pActionTrackingServices"));
+                round_kills=self.schema.field("CCSPlayerController_ActionTrackingServices","m_iNumRoundKills")
+                    .and_then(|o|opt_i32(p,tracking,Some(o))).filter(|v|(0..=100).contains(v)).map(|v|v as u32);
+                round_damage=if tracking>0 {
+                    self.schema.field("CCSPlayerController_ActionTrackingServices","m_flTotalRoundDamageDealt")
+                        .and_then(|o|try_f32(p,tracking+o))
+                        .filter(|v|v.is_finite()&&(0.0..=10_000.0).contains(v)).map(|v|v.round() as u32)
+                }else{None};
             }
             if is_local {if let Some(m)=local_motion.as_mut(){if weapon!="—"{m.weapon=Some(weapon.clone());}}}
             let entry=Player{id:slot,name:if name.is_empty(){if is_local{"Вы".into()}else{format!("Player {slot}")}}else{name},
@@ -802,7 +820,8 @@ impl CS2Reader {
                 team,local:is_local,health:hp.filter(|n|(0..=200).contains(n)),life_state:life.into(),health_verified:life=="alive",
                 armor,helmet,defuser,money,position:xyz,yaw,weapon,inventory,has_c4,c4_source:None,
                 is_flashed:if life=="alive"{self.flash_state(p,pawn)}else{Some(false)},
-                flash_remaining_secs:None,agent_model:if details{self.agent_model(p,node)}else{None}};
+                flash_remaining_secs:None,agent_model:if details{self.agent_model(p,node)}else{None},
+                round_kills,round_damage,score,mvps};
             if let Some(prev)=pawns.get(&pawn){
                 diag.add("duplicate_pawns");
                 let rank=|p:&Player|(p.local as u8,match p.life_state.as_str(){"alive"=>2,"dead"=>1,_=>0});

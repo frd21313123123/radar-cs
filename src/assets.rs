@@ -6,6 +6,8 @@ use serde::{Deserialize,Serialize};
 
 const SCHEMA_REVISION_URL:&str="https://api.github.com/repos/a2x/cs2-dumper/commits?path=output&per_page=1";
 const SCHEMA_GIT_REFS_URL:&str="https://github.com/a2x/cs2-dumper.git/info/refs?service=git-upload-pack";
+const SCHEMA_ALT_BASE:&str="https://raw.githubusercontent.com/sezzyaep/CS2-OFFSETS/main";
+const SCHEMA_ALT_REVISION_URL:&str="https://api.github.com/repos/sezzyaep/CS2-OFFSETS/commits?path=info.json&per_page=1";
 pub const MAP_SRC:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/data/available.json";
 pub const RADARS:&str="https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/images/radars/";
 const UA:&str=concat!("CAS-External-Radar-Rust/",env!("CARGO_PKG_VERSION"));
@@ -55,7 +57,13 @@ pub fn cached_json(url:&str,path:&Path,offline:bool,force:bool)->Option<Value>{
 /// The revision and all three documents are persisted together. Loose legacy
 /// cache files cannot establish that their fields belong to the same build.
 #[derive(Serialize,Deserialize)]
-struct SchemaBundle{revision:String,offsets:Value,client:Value,info:Value}
+struct SchemaBundle{
+    revision:String,
+    #[serde(default)] source:String,
+    offsets:Value,
+    client:Value,
+    info:Value,
+}
 impl SchemaBundle{
     fn schema(&self)->Result<Schema,String>{
         if self.revision.len()!=40||!self.revision.bytes().all(|b|b.is_ascii_hexdigit()){
@@ -65,6 +73,8 @@ impl SchemaBundle{
             return Err("Missing schema build number".into());
         }
         let mut info=self.info.clone();info["revision"]=json!(self.revision);
+        let source=if self.source.is_empty(){"cache"}else{self.source.as_str()};
+        info["source"]=json!(source);
         Schema::from_json(&self.offsets,&self.client,info)
     }
 }
@@ -88,7 +98,7 @@ fn git_main_revision(mut bytes:&[u8])->Option<String>{
     }
     found
 }
-fn fetch_schema_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
+fn fetch_a2x_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
     let revision=fetch(SCHEMA_REVISION_URL).and_then(|commits|{
         commits[0]["sha"].as_str().filter(|sha|sha.len()==40&&sha.bytes().all(|b|b.is_ascii_hexdigit()))
             .map(str::to_owned).ok_or_else(||"Missing schema commit".to_owned())
@@ -98,9 +108,63 @@ fn fetch_schema_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Resul
             .map_err(|git_error|format!("{api_error}; Git revision unavailable: {git_error}"))
     })?;
     let base=format!("https://raw.githubusercontent.com/a2x/cs2-dumper/{revision}/output");
-    let bundle=SchemaBundle{revision,offsets:fetch(&format!("{base}/offsets.json"))?,
+    let bundle=SchemaBundle{revision,source:"a2x/cs2-dumper".into(),
+        offsets:fetch(&format!("{base}/offsets.json"))?,
         client:fetch(&format!("{base}/client_dll.json"))?,info:fetch(&format!("{base}/info.json"))?};
     bundle.schema()?;Ok(bundle)
+}
+/// ExitScam publishes the same documents with field entries shaped as
+/// `{ "offset": N, "type": "..." }`; the schema reader expects bare offsets.
+fn normalize_alt_client(mut client:Value)->Value{
+    if let Some(modules)=client.as_object_mut(){
+        for module in modules.values_mut(){
+            if let Some(classes)=module.get_mut("classes").and_then(Value::as_object_mut){
+                for class in classes.values_mut(){
+                    if let Some(fields)=class.get_mut("fields").and_then(Value::as_object_mut){
+                        for field in fields.values_mut(){
+                            if let Some(offset)=field.get("offset").and_then(Value::as_u64){
+                                *field=json!(offset);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    client
+}
+fn pseudo_revision(info:&Value,offsets:&Value)->String{
+    use sha2::{Digest,Sha256};
+    let mut hasher=Sha256::new();
+    hasher.update(info.to_string().as_bytes());
+    hasher.update(offsets.to_string().as_bytes());
+    let hex=format!("{:x}",hasher.finalize());
+    hex[..40].to_owned()
+}
+fn fetch_alt_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
+    let info=fetch(&format!("{SCHEMA_ALT_BASE}/info.json"))?;
+    let offsets=fetch(&format!("{SCHEMA_ALT_BASE}/offsets.json"))?;
+    let client=normalize_alt_client(fetch(&format!("{SCHEMA_ALT_BASE}/client_dll.json"))?);
+    let revision=fetch(SCHEMA_ALT_REVISION_URL).ok().and_then(|commits|{
+        commits[0]["sha"].as_str().filter(|sha|sha.len()==40&&sha.bytes().all(|b|b.is_ascii_hexdigit()))
+            .map(str::to_owned)
+    }).unwrap_or_else(||pseudo_revision(&info,&offsets));
+    let bundle=SchemaBundle{revision,source:"sezzyaep/CS2-OFFSETS".into(),offsets,client,info};
+    bundle.schema()?;Ok(bundle)
+}
+fn bundle_build(bundle:&SchemaBundle)->u64{bundle.info["build_number"].as_u64().unwrap_or(0)}
+/// Fetch both public dumps and keep the newer complete build. The alternate
+/// source usually updates first after a CS2 patch; either result is validated
+/// against the same schema checks before it can replace the cache.
+fn fetch_schema_bundle(fetch:&mut impl FnMut(&str)->Result<Value,String>)->Result<SchemaBundle,String>{
+    let primary=fetch_a2x_bundle(fetch);
+    let alternate=fetch_alt_bundle(fetch);
+    match (primary,alternate){
+        (Ok(a),Ok(b))=>Ok(if bundle_build(&b)>bundle_build(&a){b}else{a}),
+        (Ok(a),Err(error))=>{eprintln!("[schema] Alternate source unavailable: {error}");Ok(a)},
+        (Err(error),Ok(b))=>{eprintln!("[schema] Primary source unavailable: {error}");Ok(b)},
+        (Err(a),Err(b))=>Err(format!("a2x: {a}; alternate: {b}")),
+    }
 }
 fn load_schema_with(cache:&Path,offline:bool,mut fetch:impl FnMut(&str)->Result<Value,String>)->Result<Schema,String>{
     let path=cache.join("schema-bundle.json");
@@ -142,7 +206,7 @@ pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
 #[cfg(test)]mod schema_bundle_tests{
     use super::*;
     fn fixture(revision:&str,build:u64,health:u64)->SchemaBundle{
-        SchemaBundle{revision:revision.repeat(40),info:json!({"build_number":build}),
+        SchemaBundle{revision:revision.repeat(40),source:"test".into(),info:json!({"build_number":build}),
             offsets:json!({"client.dll":{"dwEntityList":8,"dwLocalPlayerController":16}}),
             client:json!({"client.dll":{"classes":{
                 "CCSPlayerController":{"fields":{"m_hPlayerPawn":32}},
@@ -179,8 +243,9 @@ pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
         let cache=cache();let mut urls=Vec::new();let mut fetch=remote(fixture("b",102,36),None);
         let schema=load_schema_with(&cache,false,|url|{urls.push(url.to_owned());fetch(url)}).unwrap();
         assert_eq!(schema.info["build_number"],102);assert_eq!(schema.field("C_BaseEntity","m_iHealth"),Some(36));
-        assert_eq!(urls.len(),4);
-        assert!(urls.iter().skip(1).all(|url|url.contains(&format!("/{}/output/","b".repeat(40)))));
+        let primary:Vec<_>=urls.iter().filter(|url|url.contains("/a2x/")||*url==SCHEMA_REVISION_URL).collect();
+        assert_eq!(primary.len(),4);
+        assert!(primary.iter().skip(1).all(|url|url.contains(&format!("/{}/output/","b".repeat(40)))));
         let offline=load_schema_with(&cache,true,|_|panic!("offline load made a network request")).unwrap();
         assert_eq!(offline.field("C_BaseEntity","m_iHealth"),Some(36));fs::remove_dir_all(cache).unwrap();
     }
@@ -212,8 +277,10 @@ pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
             else if url==SCHEMA_GIT_REFS_URL{Ok(Value::String(advertisement(&revision)))}
             else{documents(url)}
         }).unwrap();
-        assert_eq!(schema.info["build_number"],102);assert_eq!(urls.len(),5);
-        assert!(urls.iter().skip(2).all(|url|url.contains(&format!("/{revision}/output/"))));
+        assert_eq!(schema.info["build_number"],102);
+        let primary:Vec<_>=urls.iter().filter(|url|url.contains("/a2x/")||*url==SCHEMA_REVISION_URL||*url==SCHEMA_GIT_REFS_URL).collect();
+        assert_eq!(primary.len(),5);
+        assert!(primary.iter().skip(2).all(|url|url.contains(&format!("/{revision}/output/"))));
         fs::remove_dir_all(cache).unwrap();
     }
     #[test]fn clean_first_launch_has_a_valid_bundle_even_when_both_network_sources_fail(){
@@ -222,6 +289,17 @@ pub fn load_schema(cache:&Path,offline:bool)->Result<Schema,String>{
         let saved:SchemaBundle=serde_json::from_slice(&fs::read(cache.join("schema-bundle.json")).unwrap()).unwrap();
         assert!(saved.schema().is_ok());assert_eq!(schema.info["revision"],saved.revision);
         fs::remove_dir_all(cache).unwrap();
+    }
+    #[test]fn alternate_schema_fields_are_normalized_to_offsets(){
+        let value=json!({"client.dll":{"classes":{"C_BaseEntity":{"fields":{
+            "m_iHealth":{"offset":844,"type":"int32"},
+            "m_iTeamNum":{"offset":999,"type":"uint8"}
+        }}}}});
+        let normalized=normalize_alt_client(value);
+        assert_eq!(normalized["client.dll"]["classes"]["C_BaseEntity"]["fields"]["m_iHealth"],844);
+        assert_eq!(normalized["client.dll"]["classes"]["C_BaseEntity"]["fields"]["m_iTeamNum"],999);
+        let revision=pseudo_revision(&json!({"build_number":14199}),&json!({"client.dll":{}}));
+        assert_eq!(revision.len(),40);assert!(revision.bytes().all(|b|b.is_ascii_hexdigit()));
     }
     #[test]fn invalid_git_advertisements_cannot_select_a_revision(){
         assert_eq!(git_main_revision(advertisement(&"a".repeat(40)).as_bytes()),Some("a".repeat(40)));
@@ -303,7 +381,16 @@ fn map_cache_needs_refresh(path:&Path,cache:&Path,now:SystemTime)->bool{
 pub fn load_maps(cache:&Path,offline:bool,force:bool)->Value{
     request_map_image_refresh(cache,offline,force);
     let got=cached_json(MAP_SRC,&cache.join("maps.json"),offline,force);
-    if got.as_ref().and_then(|v|v["maps"].as_object()).is_some(){with_bombsites(got.unwrap())}else{fallback_maps()}
+    let mut maps=if got.as_ref().and_then(|v|v["maps"].as_object()).is_some(){
+        with_bombsites(got.unwrap())
+    }else{fallback_maps()};
+    // Maps extracted from the installed game fill anything the remote list
+    // does not know yet. Manual calibration has the final word.
+    let game=crate::localmaps::load_game_maps(cache);
+    crate::localmaps::fill_missing(&mut maps,&game,false);
+    let calibrations=crate::localmaps::load_calibrations(cache);
+    crate::localmaps::fill_missing(&mut maps,&calibrations,true);
+    maps
 }
 /// Pick the same floor image and world projection metadata at a height boundary.
 /// Unknown height keeps the overview default; never invent another floor.
@@ -345,7 +432,7 @@ pub fn position_in_map_layer(radar_info:&Value,layer:&str,position:[f32;3])->boo
 
 // Framing alone cannot detect damaged IDAT data. Decode within bounded memory
 // before returning a cached/downloaded image to the browser or Windows GDI+.
-fn valid_map_png(bytes:&[u8])->bool{
+pub(crate) fn valid_map_png(bytes:&[u8])->bool{
     if bytes.len()>8_000_000 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n"){return false;}
     let mut at=8usize;let mut header=false;let mut pixels=false;
     while let Some(chunk)=bytes.get(at..at+8){
@@ -404,11 +491,30 @@ pub fn map_image(map:&str,layer:&str,maps:&Value,cache:&Path,offline:bool)->Resu
     if layer!="default" && (layer.len()>20||!layer.bytes().all(|b|b.is_ascii_lowercase()||b==b'_')){return Err("invalid layer".into());}
     let info=maps["maps"].get(map).ok_or("Unknown map")?;
     let images=info["radar_paths"].as_array().ok_or("No images listed")?;
-    let prefix=if layer=="default"{format!("{map}_radar_")}else{format!("{map}_{layer}_radar_")};
-    let mut candidates=images.iter().filter_map(Value::as_str).filter(|url|url.starts_with(RADARS)&&url.ends_with(".png"))
-        .filter_map(|url|url.rsplit('/').next().and_then(|file|if file.starts_with(&prefix)&&file.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'.'){Some((file,url))}else{None})).collect::<Vec<_>>();
+    let prefix=if layer=="default"{format!("{map}_radar")}else{format!("{map}_{layer}_radar")};
+    let safe_name=|file:&str|file.starts_with(&prefix)&&file.ends_with(".png")
+        &&file.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'.'));
+    let mut candidates:Vec<(String,Option<String>)>=Vec::new();
+    for url in images.iter().filter_map(Value::as_str) {
+        if let Some(file)=url.strip_prefix("local:") {
+            if safe_name(file){candidates.push((file.to_owned(),None));}
+        }else if url.starts_with(RADARS)&&url.ends_with(".png") {
+            if let Some(file)=url.rsplit('/').next().filter(|file|safe_name(file)) {
+                candidates.push((file.to_owned(),Some(url.to_owned())));
+            }
+        }
+    }
     candidates.sort_by_key(|(file,_)|file.len());
     let (file,url)=candidates.first().ok_or("No map image for layer")?;
+    if url.is_none() {
+        if let Ok(bytes)=fs::read(cache.join("local_maps").join(file)) {
+            if valid_map_png(&bytes){return Ok(bytes);}
+        }
+        let bytes=crate::localmaps::materialize(cache,map,layer,info)?;
+        if !valid_map_png(&bytes){return Err("Local map image is invalid".into());}
+        return Ok(bytes);
+    }
+    let url=url.as_deref().unwrap_or_default();
     let path:PathBuf=cache.join(file);
     let cached=fs::read(&path).ok();
     let damaged=cached.as_ref().is_some_and(|bytes|!valid_map_png(bytes));
